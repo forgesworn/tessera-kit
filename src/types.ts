@@ -12,8 +12,7 @@ export interface MembershipFilter {
   readonly epoch: number
   readonly type: FilterType
   // opaque internal fingerprint structure — see fuse.ts. Carried but not part of the documented contract.
-  // TK-2 will replace `unknown` with import('./fuse.js').BinaryFuse16 once that module exists.
-  readonly _fuse: unknown
+  readonly _fuse: import('./fuse.js').BinaryFuse16
   readonly _memberCountBand: number
   readonly _padded: boolean
 }

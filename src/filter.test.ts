@@ -28,7 +28,10 @@ describe('buildMembershipFilter / testMembership', () => {
     expect(f.keyed).toBe(false)
     expect(f.epoch).toBe(EPOCH)
     expect(f.type).toBe(1)
-    expect(f._padded).toBe(false)
+    // TK-6 made `padToBucket` default to TRUE, so a build with no padding opt is
+    // now padded. (The unpadded shape — `_padded:false` — is covered explicitly
+    // in padding.test.ts with `padToBucket:false`.)
+    expect(f._padded).toBe(true)
     expect(f.fingerprintBits).toBe(16)
   })
 

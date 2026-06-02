@@ -1,28 +1,27 @@
-// Public membership-filter API — a thin, allocation-free wrapper around the
-// Binary Fuse 16 core (`fuse.ts`). This is the surface most consumers touch:
-// build a filter over a set of member keys, then test arbitrary values against
-// it locally.
+// Public membership-filter API — a thin wrapper around the Binary Fuse 16 core
+// (`fuse.ts`). This is the surface most consumers touch: build a filter over a
+// set of member keys, then test arbitrary values against it locally.
 //
-// IMPORTANT — this module does NOT salt/transform inputs. `buildMembershipFilter`
-// receives member keys that the CALLER has already passed through `memberKey()`
-// (spec §12.2: the server decides open vs keyed and calls `memberKey(pk)` or
-// `memberKey(pk, salt)` before handing the array here). We only record
-// `keyed = opts.salt !== undefined` so the on-wire blob flag (TK-4) reflects how
-// the keys were derived; we never re-hash with the salt. Symmetrically,
+// IMPORTANT — this module does NOT salt/transform the caller's member keys.
+// `buildMembershipFilter` receives member keys that the CALLER has already passed
+// through `memberKey()` (spec §12.2: the server decides open vs keyed and calls
+// `memberKey(pk)` or `memberKey(pk, salt)` before handing the array here). We
+// only record `keyed = opts.salt !== undefined` so the on-wire blob flag (TK-4)
+// reflects how the keys were derived; we never re-hash with the salt. Symmetrically,
 // `testMembership(f, valueHex)` tests the given (already-transformed) value as-is
 // — the discovery layer is responsible for transforming its query the same way
 // the pool was built.
+//
+// The ONE set-level transform we apply is size-bucket PADDING (spec §7.5,
+// `padding.ts`): when `padToBucket` is on (default), we ADD decoy keys to round
+// the set size up to a power-of-two bucket. Decoys are extra inserted keys; they
+// never alter or replace a real member, and a decoy testing true is harmless (it
+// corresponds to no real subject). `_memberCountBand` always records the TRUE
+// count's bucket, never the padded size.
 
 import { BinaryFuse16 } from './fuse.js'
+import { nextPowerOfTwoBand, padMembersToBucket } from './padding.js'
 import type { FilterBuildOptions, MembershipFilter } from './types.js'
-
-/** Smallest power of two ≥ n (n ≥ 0). nextPow2(0)=1, (1)=1, (5)=8, (8)=8, (9)=16.
- *  Inlined here for TK-3; TK-6 introduces the shared `nextPowerOfTwoBand`. */
-function nextPow2(n: number): number {
-  let p = 1
-  while (p < n) p *= 2
-  return p
-}
 
 /**
  * Build a membership filter over already-`memberKey`-transformed hex values.
@@ -33,7 +32,16 @@ function nextPow2(n: number): number {
  *                       peeling requires distinct keys.
  * @param opts           `epoch` is required; `fingerprintBits` defaults to 16
  *                       (only 16 is implemented this phase); `salt` presence
- *                       only sets the `keyed` flag.
+ *                       only sets the `keyed` flag. `padToBucket` defaults to
+ *                       TRUE — the deduped set is padded with decoys up to the
+ *                       next power-of-two bucket before building, so the on-wire
+ *                       array size reveals only the coarse bucket, not the fine
+ *                       count (spec §7.5). Pass `decoySeedHex` for STABLE decoys
+ *                       (deterministic across rebuilds — defeats churn-diffing);
+ *                       omit it for the UNSTABLE CSPRNG path (padding still
+ *                       happens, but churn is diffable across epochs — see
+ *                       `padding.ts`). Pass `padToBucket: false` to build over
+ *                       the deduped members only with no decoys.
  */
 export function buildMembershipFilter(
   memberKeysHex: string[],
@@ -57,11 +65,23 @@ export function buildMembershipFilter(
     }
   }
 
-  const _fuse = BinaryFuse16.build(deduped)
+  // Band ALWAYS reflects the TRUE (deduped) member count rounded up to a power
+  // of two — NOT the padded array size. This coarse count "leaks by design"
+  // (spec §7.5); padding hides only the fine count, not the bucket.
+  const _memberCountBand = nextPowerOfTwoBand(deduped.length)
 
-  // Band reflects the TRUE (deduped) member count rounded up to a power of two.
-  // Padding to the band (TK-6) may grow the on-wire array but not this number.
-  const _memberCountBand = nextPow2(deduped.length)
+  // Padding (spec §7.5): default ON. Pad the deduped set with decoys up to the
+  // size bucket so the serialized array size reveals only the coarse bucket.
+  // `decoySeedHex` set ⇒ STABLE decoys (deterministic across rebuilds — defeats
+  // version-diffing of churn); omitted ⇒ UNSTABLE CSPRNG decoys (still padded,
+  // but churn becomes diffable across epochs). `padMembersToBucket` keeps the set
+  // a true set, so real members are never displaced by a decoy collision.
+  const padToBucket = opts.padToBucket ?? true
+  const keysToBuild = padToBucket
+    ? padMembersToBucket(deduped, _memberCountBand, opts.decoySeedHex)
+    : deduped
+
+  const _fuse = BinaryFuse16.build(keysToBuild)
 
   return {
     fingerprintBits,
@@ -70,7 +90,7 @@ export function buildMembershipFilter(
     type: 1, // 1 = fuse
     _fuse,
     _memberCountBand,
-    _padded: false, // padding is TK-6
+    _padded: padToBucket,
   }
 }
 

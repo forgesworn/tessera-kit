@@ -21,5 +21,12 @@ export interface FilterBuildOptions {
   fingerprintBits?: FingerprintBits            // default 16
   salt?: string                                // hex; presence ⇒ keyed=true
   padToBucket?: boolean                        // default true
+  /** Even-length hex seed for STABLE decoy padding (spec §7.5). When set, the
+   *  decoys added to reach the size bucket are deterministic across rebuilds, so
+   *  version-diffing can't track real churn. When OMITTED, padding still happens
+   *  but with CSPRNG-random decoys — an attacker can then track churn by diffing
+   *  array contents across epochs (the documented "unstable" case). Additive in
+   *  TK-6; pre-TK-6 callers that don't pass it get the unstable-but-padded path. */
+  decoySeedHex?: string
   epoch: number                                // unix seconds, REQUIRED
 }

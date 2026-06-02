@@ -1,0 +1,30 @@
+{
+  "name": "tessera-kit",
+  "version": "0.1.0",
+  "description": "Privacy-preserving membership-presence filter — build, test, sign, and serialize a non-enumerable Binary Fuse filter so clients answer \"is this person here?\" locally.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./capability": { "types": "./dist/capability.d.ts", "default": "./dist/capability.js" }
+  },
+  "files": ["dist", "LICENSE", "llms.txt"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["membership", "filter", "binary-fuse", "presence", "privacy", "nostr", "schnorr"],
+  "author": "forgesworn",
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": { "node": ">=22" },
+  "dependencies": { "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1" },
+  "devDependencies": { "typescript": "^6.0.2", "vitest": "^4.1.0" },
+  "publishConfig": { "provenance": true },
+  "funding": { "type": "lightning", "url": "lightning:thedonkey@strike.me" },
+  "repository": { "type": "git", "url": "https://github.com/forgesworn/tessera-kit.git" }
+}

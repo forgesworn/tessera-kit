@@ -38,7 +38,17 @@ const OFF_SEED = 16
 const OFF_SEGMENT_LENGTH = 20
 const OFF_SEGMENT_COUNT = 24
 const OFF_MEMBER_COUNT_BAND = 28
-const OFF_FINGERPRINTS = KFLT_HEADER_LEN // 128
+
+// Signing regions, exported so `sign.ts` (TK-5) reuses ONE definition of the
+// byte layout rather than re-hardcoding 32/64/128. signer_pubkey is the 32-byte
+// x-only key at [32,64); sig is the 64-byte Schnorr signature at [64,128); the
+// fingerprint array begins at [128, end).
+/** Byte offset of the 32-byte x-only signer pubkey. */
+export const OFF_SIGNER_PUBKEY = 32
+/** Byte offset of the 64-byte Schnorr signature. */
+export const OFF_SIGNATURE = 64
+/** Byte offset where the fingerprint array begins (= header length, 128). */
+export const OFF_FINGERPRINTS = KFLT_HEADER_LEN // 128
 
 // Magic bytes: "KFLT".
 const MAGIC_0 = 0x4b // K

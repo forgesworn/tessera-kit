@@ -1,0 +1,83 @@
+# tessera-kit
+
+> A server wants to let a member answer "is my friend here?" without publishing
+> its member list and without a who's-here lookup API (which would log interest
+> and centralise the social graph). tessera-kit lets the server publish one
+> signed, immutable blob per epoch; a member who already holds a friend's pubkey
+> tests that one key against the blob LOCALLY. The blob carries 16-bit
+> fingerprints, not keys, so members cannot be enumerated.
+
+tessera-kit is a TypeScript library for non-enumerable membership-presence
+filters, built on a clean-room Binary Fuse 16 port with a custom signed byte
+format (`KFLT`). ESM-only, Node ≥ 22. Two deps: `@noble/curves`, `@noble/hashes`.
+It is the membership-presence brick of the Forgesworn / Signet ecosystem and is
+consumed by `kindred` (relationships + discovery).
+
+## Getting Started
+
+```
+npm i tessera-kit
+```
+
+```typescript
+import {
+  memberKey, buildMembershipFilter, serializeFilter, signFilterBlob,
+  parseFilter, verifyFilterBlob, testMembership,
+} from 'tessera-kit'
+
+// Server: build an open pool, serialize, sign in place, publish the bytes.
+const f = buildMembershipFilter(pubkeys.map((pk) => memberKey(pk)), { epoch })
+const blob = serializeFilter(f)
+signFilterBlob(blob, serverPrivHex)
+
+// Client: parse, VERIFY against a pinned key, then test a held friend key.
+const filter = parseFilter(blob)
+const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
+if (!valid || signerPubkeyHex !== PINNED_SERVER_PUBKEY) throw new Error('untrusted')
+const present = testMembership(filter, memberKey(friendPubkey))
+```
+
+## Key Concepts
+
+- **memberKey** — the value inserted/tested: the pubkey (open pool) or
+  `sha256(salt ‖ pubkey)` (keyed pool). The salt is never in the blob.
+- **Open vs keyed** — open = discoverable by anyone holding the pubkey; keyed =
+  a speed-bump (needs the out-of-band salt), NOT a member-privacy boundary.
+- **KFLT blob** — 128-byte header (magic/version/flags/epoch/32-bit seed/geometry/
+  signer-pubkey/Schnorr sig) + a u16 fingerprint array. See PROTOCOL.md.
+- **Provenance signature** — Schnorr over `sha256(blob[0..64) ‖ sha256(blob[128..end)))`.
+  `verifyFilterBlob` checks consistency; trust = comparing the signer to a PINNED key.
+- **Capability token** — subject-signed consent to be located on a keyed server
+  (`./capability`); still pin-verify the filter.
+- **Padding** — rounds the member count to a power-of-two bucket with decoys; pass
+  a stable `decoySeedHex` to stop epoch-to-epoch churn-diffing.
+
+## API Surface
+
+`.`:
+- `memberKey(pubkeyHex, saltHex?)` — derive the open/keyed insert/test value
+- `buildMembershipFilter(valuesHex, opts)` — build a Binary Fuse 16 filter (`opts.epoch` required)
+- `testMembership(filter, valueHex)` — local membership test (no false negatives; FP ≈ 2⁻¹⁶)
+- `serializeFilter(filter)` / `parseFilter(blob)` — KFLT encode / hardened decode
+- `signFilterBlob(blob, signerPrivHex)` — sign in place (Schnorr)
+- `verifyFilterBlob(blob)` — `{ signerPubkeyHex, valid }`; never throws
+- `nextPowerOfTwoBand(n)` / `deriveDecoys(seedHex, count)` — size band + stable decoys
+- types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, `KFLT_*`
+
+`./capability`:
+- `issuePresenceCapability(p, subjectPrivHex)` / `testWithCapability(filter, cap, now?)`
+- type `PresenceCapability` (`serverId` must be colon-free)
+
+## Security
+
+Non-enumerable is NOT non-confirmable: a held specific pubkey is always
+confirmable-present. Keyed pools are a speed-bump, not a boundary. **Consumers
+MUST `verifyFilterBlob` against a pinned server key before trusting any hit** — a
+forged filter is a doxxing primitive. Full posture in SECURITY.md.
+
+## Optional
+
+- [README](https://github.com/forgesworn/tessera-kit/blob/main/README.md): usage guide with examples
+- [PROTOCOL.md](https://github.com/forgesworn/tessera-kit/blob/main/PROTOCOL.md): KFLT byte layout, fuse construction + seed scheme, signing digest, capability bytes, Nostr publication shape, FPR math
+- [SECURITY.md](https://github.com/forgesworn/tessera-kit/blob/main/SECURITY.md): honest privacy posture (keyed = speed-bump; pin-verify mandatory; accumulation budget)
+- [kindred](https://github.com/forgesworn/kindred): relationships + discovery primitive that consumes tessera-kit

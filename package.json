@@ -9,7 +9,7 @@
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
     "./capability": { "types": "./dist/capability.d.ts", "default": "./dist/capability.js" }
   },
-  "files": ["dist", "LICENSE", "llms.txt"],
+  "files": ["dist", "LICENSE", "llms.txt", "README.md", "PROTOCOL.md", "SECURITY.md"],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",

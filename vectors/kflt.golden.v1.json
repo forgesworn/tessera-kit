@@ -1,0 +1,30 @@
+{
+  "description": "KFLT v1 frozen golden vector for @forgesworn/tessera-kit. UNSIGNED serializeFilter output (signer[32,64) + sig[64,128) regions are zero — Schnorr signing is non-deterministic and has its own tests). Determinism via padToBucket:false (no random decoys). Cross-impl / future-Rust-port contract: rebuilding the Binary Fuse 16 filter from memberKeysHex + opts and serializing MUST reproduce serializedBlobHex byte-for-byte, and the membership results MUST match.",
+  "memberKeysHex": [
+    "1111111111111111111111111111111111111111111111111111111111111111",
+    "2222222222222222222222222222222222222222222222222222222222222222",
+    "3333333333333333333333333333333333333333333333333333333333333333",
+    "abababababababababababababababababababababababababababababababab01",
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef00"
+  ],
+  "opts": {
+    "fingerprintBits": 16,
+    "epoch": 1700000000,
+    "padToBucket": false
+  },
+  "serializedBlobHex": "4b464c540101100000f15365000000006c6b6666080000000100000008000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002c2200000000000000000000aecb00000000835a0000d0cc0000b16a00000000",
+  "membership": {
+    "present": [
+      "1111111111111111111111111111111111111111111111111111111111111111",
+      "2222222222222222222222222222222222222222222222222222222222222222",
+      "3333333333333333333333333333333333333333333333333333333333333333",
+      "abababababababababababababababababababababababababababababababab01",
+      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef00"
+    ],
+    "absent": [
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "4444444444444444444444444444444444444444444444444444444444444444"
+    ]
+  }
+}

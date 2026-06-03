@@ -21,6 +21,7 @@
   },
   "files": [
     "dist",
+    "vectors",
     "LICENSE",
     "llms.txt",
     "README.md",
@@ -32,6 +33,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "vectors:check": "node ./scripts/check-vectors.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -65,8 +67,12 @@
     "type": "lightning",
     "url": "lightning:thedonkey@strike.me"
   },
+  "homepage": "https://github.com/forgesworn/tessera-kit#readme",
+  "bugs": {
+    "url": "https://github.com/forgesworn/tessera-kit/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/forgesworn/tessera-kit.git"
+    "url": "git+https://github.com/forgesworn/tessera-kit.git"
   }
 }

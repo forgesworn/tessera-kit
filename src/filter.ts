@@ -94,18 +94,29 @@ export function buildMembershipFilter(
   }
 }
 
+/** Exactly 64 hex chars (32 bytes). `testMembership` validates its input against this so a malformed
+ *  value surfaces a KIT-SHAPED error at the public boundary rather than a raw @noble `RangeError`.
+ *  Case-insensitive (the value is lowercased before the fuse lookup). */
+const HEX64 = /^[0-9a-f]{64}$/i
+
 /**
  * Test whether `valueHex` is a member of `f`.
  *
  * `valueHex` is tested as-is (the caller must have transformed it the same way
- * the pool was built — see the module note). The input is lowercased for safety
- * so that case-variant hex matches; we intentionally do NOT reject non-64-hex
- * input — `memberKey` outputs are always 64-hex, and leniency here avoids
- * surprising the discovery layer (the fuse hashes arbitrary hex uniformly).
+ * the pool was built — see the module note). It is VALIDATED to be exactly 64 hex
+ * chars first (the `memberKey` output shape): an odd-length / non-hex / wrong-length
+ * value throws a kit-shaped `Error` (matching `memberKey`'s style) instead of leaking
+ * a raw @noble `RangeError` — or, worse, silently testing `false` for a non-hex string.
+ * Every internal caller already passes `memberKey(...)` output (always 64-hex), so the
+ * guard is a no-op for them; it only rejects a hand-built bad value at the boundary.
+ * The validated value is lowercased so case-variant hex still matches.
  *
  * False negatives are impossible after a successful build; false positives occur
  * at ≈ 2^-16.
  */
 export function testMembership(f: MembershipFilter, valueHex: string): boolean {
+  if (typeof valueHex !== 'string' || !HEX64.test(valueHex)) {
+    throw new Error('tessera-kit: testMembership value must be 64 hex chars')
+  }
   return f._fuse.contains(valueHex.toLowerCase())
 }

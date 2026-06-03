@@ -103,3 +103,42 @@ describe('buildMembershipFilter / testMembership', () => {
     expect(openHits).toBe(0)
   })
 })
+
+// `testMembership` is a PUBLIC boundary. A malformed `valueHex` (odd-length / non-hex) must surface a
+// KIT-SHAPED error, not a raw @noble `RangeError` leaking from the fuse hash. Every INTERNAL caller
+// passes `memberKey(...)` output (always 64-hex), so the guard is safe; it only rejects callers that
+// hand-build a bad value. Case-variant hex is still accepted (lowercased internally).
+describe('testMembership — 64-hex input guard (kit-shaped error at the public boundary)', () => {
+  const pks = pubkeys(5, 21)
+  const f = buildMembershipFilter(
+    pks.map((pk) => memberKey(pk)),
+    { epoch: EPOCH },
+  )
+
+  it('throws a kit-shaped error on an odd-length hex value (not a raw @noble RangeError)', () => {
+    expect(() => testMembership(f, 'abc')).toThrow('tessera-kit: testMembership value must be 64 hex chars')
+  })
+
+  it('throws a kit-shaped error on a non-hex value', () => {
+    expect(() => testMembership(f, 'z'.repeat(64))).toThrow(
+      'tessera-kit: testMembership value must be 64 hex chars',
+    )
+  })
+
+  it('throws a kit-shaped error on a wrong-length (but hex) value', () => {
+    expect(() => testMembership(f, 'ab'.repeat(31))).toThrow(
+      'tessera-kit: testMembership value must be 64 hex chars',
+    )
+    expect(() => testMembership(f, 'ab'.repeat(33))).toThrow(
+      'tessera-kit: testMembership value must be 64 hex chars',
+    )
+    expect(() => testMembership(f, '')).toThrow('tessera-kit: testMembership value must be 64 hex chars')
+  })
+
+  it('still accepts a valid 64-hex value, case-insensitively', () => {
+    const member = memberKey(pks[0] as string) // 64-hex
+    expect(testMembership(f, member)).toBe(true)
+    // Uppercased variant of the same 64-hex value is still accepted (lowercased internally).
+    expect(testMembership(f, member.toUpperCase())).toBe(true)
+  })
+})

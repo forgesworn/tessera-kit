@@ -259,23 +259,23 @@ the private-key byte copy in a `finally`.
 
 ### 4.2 Verification is consistency, not trust
 
-`verifyFilterBlob(blob) → { signerPubkeyHex, valid }`:
+`verifyFilterBlob(blob) → { signerPubkeyHex, ok }`:
 
 - reads `signer_pubkey` from `[32,64)` and `sig` from `[64,128)`, recomputes the
-  digest (§4.1), returns `valid = schnorr.verify(sig, digest, signer_pubkey)`;
+  digest (§4.1), returns `ok = schnorr.verify(sig, digest, signer_pubkey)`;
 - never throws on hostile input: a `< 128`-byte blob returns
-  `{ signerPubkeyHex: '', valid: false }`; a malformed sig/pubkey yields
-  `valid:false`.
+  `{ signerPubkeyHex: '', ok: false }`; a malformed sig/pubkey yields
+  `ok:false`.
 
-> **`valid:true` is NOT trust.** It means only "this blob carries an
+> **`ok:true` is NOT trust.** It means only "this blob carries an
 > internally-consistent BIP340 signature by `signerPubkeyHex`." Anyone can mint a
 > validly self-signed blob under their **own** key. The consumer **MUST** compare
 > `signerPubkeyHex` against a **pinned / out-of-band-known** server key before
 > trusting any membership result:
 >
 > ```
-> const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
-> if (!valid || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
+> const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+> if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
 > ```
 
 ---
@@ -303,8 +303,9 @@ sig      = hex( schnorr.sign(digest, subjectPriv) )    // 64-byte BIP340 compact
 - `subjectPubHex`: 64 lowercase hex (x-only). `issuePresenceCapability` asserts it
   equals the signing key's pubkey — you cannot issue for a key you don't control.
 - `saltHint`: even-length lowercase hex; **may be empty**. `saltHint = ''`
-  corresponds to an **open-pool** capability, i.e. the value tested is
-  `memberKey(subjectPubHex, '')` (noted in `SECURITY.md`).
+  corresponds to an **open-pool** capability, i.e. the value tested is the **bare
+  open-pool form** `memberKey(subjectPubHex)` (the pubkey itself), **not**
+  `memberKey(subjectPubHex, '')` — see §5.4 and `SECURITY.md`.
 - `expiresAt`: finite number (unix seconds). Valid while `now ≤ expiresAt` (the
   boundary instant is still valid).
 - `sig`: 128 hex chars.
@@ -327,21 +328,38 @@ two distinct tuples produce identical preimage bytes.
 `testWithCapability(filter, cap, now?)` checks, in order: (1) field shapes; (2)
 **expiry** (`now > expiresAt` → throw `'capability expired'`); (3) **signature**
 (`schnorr.verify` against `subjectPubHex`, else throw
-`'capability signature invalid'`); (4) **only then**
-`testMembership(filter, memberKey(subjectPubHex, saltHint))`. An expired/forged
-capability **throws** (a usage error) rather than returning a silent `false`, so
-a caller can never confuse "not present" with "this token is no good."
+`'capability signature invalid'`); (4) **only then** the membership test —
+`testMembership(filter, memberKey(subjectPubHex, saltHint))` for a non-empty
+`saltHint`, or the **bare open-pool form**
+`testMembership(filter, memberKey(subjectPubHex))` when `saltHint = ''` (§5.2). An
+expired/forged capability **throws** (a usage error) rather than returning a
+silent `false`, so a caller can never confuse "not present" with "this token is
+no good."
 
 ---
 
 ## 6. Server publication shape (zero `kindred` dependency)
 
 A server that only needs to *publish* a filter can depend on **tessera-kit alone**
-and emit the Nostr event directly — no `kindred` import required. This mirrors
-`kindred/discovery`'s `buildFilterPublication`, documented here so a
-tessera-kit-only server can produce the identical event.
+— no `kindred` import required. The reusable mechanics live in the optional
+**`./nostr`** subpath (import `@forgesworn/tessera-kit/nostr`):
 
-**Addressable event, `kind 30444`:**
+```
+buildFilterPublication({ kind, tags, blob, createdAt }) → EventTemplate
+  // = { kind, tags, content: base64(blob), created_at: createdAt }
+decodeFilterPublicationContent(content, maxBytes?) → Uint8Array   // inverse, with a length cap
+```
+
+`buildFilterPublication` is **relationship-agnostic**: it base64-encodes the blob
+into `content` and assembles the `EventTemplate`, but the **caller supplies the
+`kind` and `tags`**. tessera-kit deliberately does **not** know kindred's
+addressing convention (the `30444` kind, the `kindred:members:` d-tag, the `#n`
+namespace tag) — `kindred/discovery` delegates to this builder, passing those
+values in. The `./nostr` subpath is the only one that pulls in `@scure/base` (for
+base64); the core `.` / `./capability` entries stay `@noble`-only.
+
+**Example — the addressable event `kindred` emits (kind `30444`):** the
+caller-supplied `kind` + `tags` that reproduce kindred's publication are:
 
 | Tag / field | Value |
 |-------------|-------|
@@ -350,7 +368,7 @@ tessera-kit-only server can produce the identical event.
 | `["n", "<namespace>"]` | indexable namespace tag, so an aggregator can `#n`-filter across many `serverId`s |
 | `["epoch", "<n>"]` | the filter epoch (unix seconds) — consumers reject `epoch ≤ last-seen` for a `(namespace, serverId)` |
 | `["keyed", "0" \| "1"]` | whether the pool is keyed |
-| `content` | **base64 of the raw `KFLT` blob** |
+| `content` | **base64 of the raw `KFLT` blob** (produced by `buildFilterPublication`) |
 
 The event itself is signed by the publisher's Nostr key (standard NIP-01); that
 is **separate** from the in-blob Schnorr provenance signature (§4). A consumer

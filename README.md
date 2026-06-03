@@ -2,8 +2,8 @@
 
 **Privacy-preserving membership-presence filter — build, sign, and serialize a non-enumerable Binary Fuse filter so a client can answer "is this person here?" locally, without the server ever exposing a member list or a query API.**
 
-[![npm](https://img.shields.io/npm/v/tessera-kit)](https://www.npmjs.com/package/tessera-kit)
-[![licence](https://img.shields.io/npm/l/tessera-kit)](https://github.com/forgesworn/tessera-kit/blob/main/LICENSE)
+[![npm](https://img.shields.io/npm/v/%40forgesworn%2Ftessera-kit)](https://www.npmjs.com/package/@forgesworn/tessera-kit)
+[![licence](https://img.shields.io/npm/l/%40forgesworn%2Ftessera-kit)](https://github.com/forgesworn/tessera-kit/blob/main/LICENSE)
 ![TypeScript](https://img.shields.io/badge/TypeScript-native-blue)
 ![ESM only](https://img.shields.io/badge/module-ESM--only-informational)
 
@@ -29,7 +29,7 @@ carries 16-bit *fingerprints*, not keys.
 ## Install
 
 ```bash
-npm i tessera-kit
+npm i @forgesworn/tessera-kit
 ```
 
 ESM-only, Node ≥ 22. Two runtime deps: `@noble/curves`, `@noble/hashes`.
@@ -44,7 +44,7 @@ import {
   buildMembershipFilter,
   serializeFilter,
   signFilterBlob,
-} from 'tessera-kit'
+} from '@forgesworn/tessera-kit'
 
 const epoch = Math.floor(Date.now() / 1000)
 
@@ -73,16 +73,16 @@ signFilterBlob(blob, serverPrivHex) // mutates `blob`: writes signer pubkey + si
 ### Client — parse, **verify against a pinned key**, then test
 
 ```typescript
-import { parseFilter, verifyFilterBlob, testMembership, memberKey } from 'tessera-kit'
+import { parseFilter, verifyFilterBlob, testMembership, memberKey } from '@forgesworn/tessera-kit'
 
 // `parseFilter` validates the blob is SELF-CONSISTENT bytes. It does NOT
 // authenticate origin — never trust a hit on parse alone.
 const filter = parseFilter(blob)
 
-// Provenance gate. `valid:true` means only "internally-consistent sig by
-// signerPubkeyHex." Trust comes from the PINNED-key comparison, not from `valid`.
-const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
-if (!valid || signerPubkeyHex !== PINNED_SERVER_PUBKEY) {
+// Provenance gate. `ok:true` means only "internally-consistent sig by
+// signerPubkeyHex." Trust comes from the PINNED-key comparison, not from `ok`.
+const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) {
   throw new Error('untrusted filter — refuse to test')
 }
 
@@ -102,7 +102,7 @@ token for anyone else. The token is signed by the **subject** (consent), not the
 server (provenance) — still pin-verify the filter.
 
 ```typescript
-import { issuePresenceCapability, testWithCapability } from 'tessera-kit/capability'
+import { issuePresenceCapability, testWithCapability } from '@forgesworn/tessera-kit/capability'
 
 // Subject (the friend) issues a capability for a colon-free serverId.
 const cap = issuePresenceCapability(
@@ -127,7 +127,7 @@ const friendPresent = testWithCapability(keyedFilter, cap)
 | `serializeFilter(filter)` | Encode to the `KFLT` blob (signer/sig regions left zero). |
 | `parseFilter(blob)` | Hardened decode — validates magic/version/geometry and recomputes length **before** allocating. Self-consistency only; **not** provenance. |
 | `signFilterBlob(blob, signerPrivHex)` | Sign the blob **in place** (writes signer pubkey + Schnorr sig). Zeroizes the priv byte copy. |
-| `verifyFilterBlob(blob)` | `{ signerPubkeyHex, valid }`. Never throws on hostile input. **Compare `signerPubkeyHex` to a pinned key before trusting a hit.** |
+| `verifyFilterBlob(blob)` | `{ signerPubkeyHex, ok }`. Never throws on hostile input. **Compare `signerPubkeyHex` to a pinned key before trusting a hit.** |
 | `nextPowerOfTwoBand(n)` | Size-bucket function (the `member_count_band`). |
 | `deriveDecoys(decoySeedHex, count)` | Deterministic decoy keys for stable padding. |
 

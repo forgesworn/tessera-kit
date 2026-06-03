@@ -187,8 +187,9 @@ export function issuePresenceCapability(
  *   2. `now ?? floor(Date.now()/1000)`. If `now > expiresAt` → throw 'capability expired'.
  *   3. Recompute the digest and `schnorr.verify` against `subjectPubHex`.
  *      Invalid (or noble-rejected) → throw 'capability signature invalid'.
- *   4. ONLY THEN compute `memberKey(subjectPubHex, saltHint)` and return
- *      `testMembership(f, value)`.
+ *   4. ONLY THEN compute the membership value — `memberKey(subjectPubHex, saltHint)`
+ *      for a non-empty hint, or the BARE open-pool form `memberKey(subjectPubHex)`
+ *      when `saltHint === ''` (§6 / SECURITY.md) — and return `testMembership(f, value)`.
  *
  * An expired or invalid capability is a USAGE error — we THROW rather than
  * silently returning false, so a caller can't confuse "not present" with "this
@@ -246,7 +247,14 @@ export function testWithCapability(
     throw new Error('capability signature invalid')
   }
 
-  // 4. ONLY after sig + expiry pass: compute the keyed memberKey and test it.
-  const value = memberKey(subjectPubHex, saltHint)
+  // 4. ONLY after sig + expiry pass: compute the membership value and test it.
+  //    An EMPTY saltHint is an OPEN-pool capability (SECURITY.md §6) — its value
+  //    is the BARE open-pool form `memberKey(pk)`, NOT `memberKey(pk, '')` (which
+  //    is sha256('' ‖ pk) and would never appear in an open pool built over bare
+  //    pubkeys). Computing the keyed form for an empty hint was a false-negative
+  //    that contradicted the documented behaviour (audit fix). A non-empty hint
+  //    keeps the keyed form `memberKey(pk, saltHint)`.
+  const value =
+    saltHint === '' ? memberKey(subjectPubHex) : memberKey(subjectPubHex, saltHint)
   return testMembership(f, value)
 }

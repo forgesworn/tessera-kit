@@ -16,14 +16,14 @@ consumed by `kindred` (relationships + discovery).
 ## Getting Started
 
 ```
-npm i tessera-kit
+npm i @forgesworn/tessera-kit
 ```
 
 ```typescript
 import {
   memberKey, buildMembershipFilter, serializeFilter, signFilterBlob,
   parseFilter, verifyFilterBlob, testMembership,
-} from 'tessera-kit'
+} from '@forgesworn/tessera-kit'
 
 // Server: build an open pool, serialize, sign in place, publish the bytes.
 const f = buildMembershipFilter(pubkeys.map((pk) => memberKey(pk)), { epoch })
@@ -32,8 +32,8 @@ signFilterBlob(blob, serverPrivHex)
 
 // Client: parse, VERIFY against a pinned key, then test a held friend key.
 const filter = parseFilter(blob)
-const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
-if (!valid || signerPubkeyHex !== PINNED_SERVER_PUBKEY) throw new Error('untrusted')
+const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) throw new Error('untrusted')
 const present = testMembership(filter, memberKey(friendPubkey))
 ```
 
@@ -60,7 +60,7 @@ const present = testMembership(filter, memberKey(friendPubkey))
 - `testMembership(filter, valueHex)` — local membership test (no false negatives; FP ≈ 2⁻¹⁶)
 - `serializeFilter(filter)` / `parseFilter(blob)` — KFLT encode / hardened decode
 - `signFilterBlob(blob, signerPrivHex)` — sign in place (Schnorr)
-- `verifyFilterBlob(blob)` — `{ signerPubkeyHex, valid }`; never throws
+- `verifyFilterBlob(blob)` — `{ signerPubkeyHex, ok }`; never throws
 - `nextPowerOfTwoBand(n)` / `deriveDecoys(seedHex, count)` — size band + stable decoys
 - types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, `KFLT_*`
 

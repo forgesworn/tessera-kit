@@ -50,15 +50,15 @@ make `testMembership` report a friend as "present" on a server they never joined
 - Consumers **MUST** call `verifyFilterBlob(blob)` and compare the returned
   `signerPubkeyHex` against a **pinned / out-of-band-known** server key **before**
   trusting any membership result.
-- `verifyFilterBlob` returning `valid: true` means **only** "this blob carries an
+- `verifyFilterBlob` returning `ok: true` means **only** "this blob carries an
   internally-consistent BIP340 Schnorr signature by `signerPubkeyHex`." It is
   **not** trust. Anyone can mint a validly self-signed blob under their own key;
-  the **pinned-key comparison**, not `valid` alone, is what defeats forged-filter
+  the **pinned-key comparison**, not `ok` alone, is what defeats forged-filter
   doxxing.
 
 ```
-const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
-if (!valid || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
+const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
 ```
 
 ### 4. The count band leaks a coarse count by design; padding hides only the fine count
@@ -95,9 +95,14 @@ genuine. A consumer holding a valid capability **must still** pin-verify the
 filter (§3) before trusting the hit. Consent and provenance are orthogonal; the
 kit keeps them in separate signatures.
 
-`saltHint = ''` in a capability corresponds to an **open-pool** capability (the
-value tested is `memberKey(subjectPubHex, '')`), noted so an empty hint is not
-mistaken for a malformed token.
+`saltHint = ''` in a capability corresponds to an **open-pool** capability: the
+value tested is the **bare open-pool form** `memberKey(subjectPubHex)` (the
+pubkey itself), **not** `memberKey(subjectPubHex, '')` (which is
+`sha256('' ‖ pk)` — the keyed value for an empty salt, and never a member of an
+open pool). `testWithCapability` branches on the empty hint so an empty-hint
+capability matches the open pool it names — noted so an empty hint is neither
+mistaken for a malformed token nor silently turned into a non-matching keyed
+value.
 
 ### 7. Keyed mode trades third-party probing for server-side pull-auth logging
 

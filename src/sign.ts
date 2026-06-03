@@ -95,47 +95,47 @@ export function signFilterBlob(
  * Verify a KFLT blob's embedded Schnorr signature and return the embedded signer
  * pubkey. Recomputes the digest with the exact same construction as signing.
  *
- * ⚠️ CRITICAL — `valid: true` IS NOT TRUST. It means ONLY: "this blob carries an
+ * ⚠️ CRITICAL — `ok: true` IS NOT TRUST. It means ONLY: "this blob carries an
  * internally-consistent BIP340 Schnorr signature by `signerPubkeyHex`." Anyone
  * can mint a validly-self-signed blob under their OWN key (see the threat-model
  * test in sign.test.ts) — a forged filter is a doxxing primitive. The consumer
  * **MUST** compare `signerPubkeyHex` against a PINNED / out-of-band-known server
  * key before trusting ANY membership result (spec §10 invariant 5). The pinned-
- * key comparison — not `valid` alone — is what defeats forged-filter doxxing:
+ * key comparison — not `ok` alone — is what defeats forged-filter doxxing:
  *
- *   const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
- *   if (!valid || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
+ *   const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+ *   if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
  *
  * Never throws on malformed/hostile input: a too-short blob returns
- * `{ signerPubkeyHex: '', valid: false }`, and any sig/pubkey that the verifier
- * rejects (or that fails noble's argument validation) yields `valid: false`.
+ * `{ signerPubkeyHex: '', ok: false }`, and any sig/pubkey that the verifier
+ * rejects (or that fails noble's argument validation) yields `ok: false`.
  *
  * @param blob the raw (signed) KFLT blob.
  * @returns the embedded signer pubkey (hex; `''` if the blob is too short) and
- *          whether the signature is internally valid under that pubkey.
+ *          whether the signature is internally valid under that pubkey (`ok`).
  */
 export function verifyFilterBlob(blob: Uint8Array): {
   signerPubkeyHex: string
-  valid: boolean
+  ok: boolean
 } {
   // A malformed too-short blob must not crash — report invalid with no signer.
   if (blob.length < OFF_FINGERPRINTS) {
-    return { signerPubkeyHex: '', valid: false }
+    return { signerPubkeyHex: '', ok: false }
   }
 
   const signerPub = blob.subarray(OFF_SIGNER_PUBKEY, OFF_SIGNATURE) // [32,64)
   const sig = blob.subarray(OFF_SIGNATURE, OFF_FINGERPRINTS) // [64,128)
   const signerPubkeyHex = bytesToHex(signerPub)
 
-  let valid = false
+  let ok = false
   try {
     const digest = computeDigest(blob)
-    valid = schnorr.verify(sig, digest, signerPub)
+    ok = schnorr.verify(sig, digest, signerPub)
   } catch {
     // A malformed sig/pubkey (e.g. failing noble's argument type validation) must
-    // yield valid:false, not throw. No console output.
-    valid = false
+    // yield ok:false, not throw. No console output.
+    ok = false
   }
 
-  return { signerPubkeyHex, valid }
+  return { signerPubkeyHex, ok }
 }

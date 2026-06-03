@@ -44,8 +44,8 @@ function signedBlob(n = 50, tag = 7): { blob: Uint8Array; memberKeys: string[] }
 describe('signFilterBlob / verifyFilterBlob — round-trip', () => {
   it('signs an unsigned KFLT blob and verifies valid with the correct signer pubkey', () => {
     const { blob } = signedBlob(50)
-    const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
-    expect(valid).toBe(true)
+    const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+    expect(ok).toBe(true)
     expect(signerPubkeyHex).toBe(SERVER.pubHex)
   })
 
@@ -61,8 +61,8 @@ describe('signFilterBlob / verifyFilterBlob — round-trip', () => {
   it('round-trips across many sizes', () => {
     for (const n of [0, 1, 2, 3, 10, 100, 500]) {
       const { blob } = signedBlob(n, 30 + n)
-      const { valid, signerPubkeyHex } = verifyFilterBlob(blob)
-      expect(valid).toBe(true)
+      const { ok, signerPubkeyHex } = verifyFilterBlob(blob)
+      expect(ok).toBe(true)
       expect(signerPubkeyHex).toBe(SERVER.pubHex)
     }
   })
@@ -93,7 +93,7 @@ describe('signFilterBlob → end-to-end with parseFilter', () => {
   it('a signed blob still parses and every member tests true (signing does not corrupt fingerprints)', () => {
     const { blob, memberKeys } = signedBlob(80, 41)
     // Verify provenance...
-    expect(verifyFilterBlob(blob).valid).toBe(true)
+    expect(verifyFilterBlob(blob).ok).toBe(true)
     // ...and the structure is intact.
     const parsed = parseFilter(blob)
     for (const k of memberKeys) expect(testMembership(parsed, k)).toBe(true)
@@ -115,26 +115,26 @@ describe('verifyFilterBlob — tamper detection (flip a byte in each region)', (
   it('(a) flipping a byte in the header [0,32) invalidates', () => {
     const { blob } = signedBlob(40)
     blob[8] ^= 0xff // inside epoch field, header region
-    expect(verifyFilterBlob(blob).valid).toBe(false)
+    expect(verifyFilterBlob(blob).ok).toBe(false)
   })
 
   it('(b) flipping a byte in signer_pubkey [32,64) invalidates (verify uses a different key)', () => {
     const { blob } = signedBlob(40)
     blob[40] ^= 0xff // inside signer_pubkey
-    const { valid } = verifyFilterBlob(blob)
-    expect(valid).toBe(false)
+    const { ok } = verifyFilterBlob(blob)
+    expect(ok).toBe(false)
   })
 
   it('(c) flipping a byte in the sig [64,128) invalidates', () => {
     const { blob } = signedBlob(40)
     blob[100] ^= 0xff // inside sig
-    expect(verifyFilterBlob(blob).valid).toBe(false)
+    expect(verifyFilterBlob(blob).ok).toBe(false)
   })
 
   it('(d) flipping a byte in the fingerprint array [128,end) invalidates', () => {
     const { blob } = signedBlob(40)
     blob[blob.length - 1] ^= 0xff // last fingerprint byte
-    expect(verifyFilterBlob(blob).valid).toBe(false)
+    expect(verifyFilterBlob(blob).ok).toBe(false)
   })
 
   it('every single-byte flip across the whole blob invalidates (exhaustive over a small blob)', () => {
@@ -144,7 +144,7 @@ describe('verifyFilterBlob — tamper detection (flip a byte in each region)', (
       b[i] = (b[i] as number) ^ 0xff
       // A flip anywhere — header, signer, sig, or fingerprints — must break it.
       // (signer_pubkey flips change the verifying key, which also yields false.)
-      expect(verifyFilterBlob(b).valid).toBe(false)
+      expect(verifyFilterBlob(b).ok).toBe(false)
     }
   })
 })
@@ -156,9 +156,9 @@ describe('verifyFilterBlob — wrong key', () => {
     expect(KEY_B.pubHex).not.toBe(SERVER.pubHex)
     // Overwrite signer_pubkey [32,64) with B's pubkey, leaving A's sig in place.
     blob.set(hexToBytes(KEY_B.pubHex), 32)
-    const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
+    const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
     expect(signerPubkeyHex).toBe(KEY_B.pubHex) // it reports the embedded (forged) key
-    expect(valid).toBe(false) // ...but the sig doesn't verify under it
+    expect(ok).toBe(false) // ...but the sig doesn't verify under it
   })
 })
 
@@ -169,46 +169,46 @@ describe('verifyFilterBlob — pinned-key threat model (spec §10 invariant 5)',
     const { f } = openFilter(25, 77)
     const forged = signFilterBlob(serializeFilter(f), ATTACKER.privHex)
 
-    const { signerPubkeyHex, valid } = verifyFilterBlob(forged)
-    // The blob is internally consistent — valid:true...
-    expect(valid).toBe(true)
+    const { signerPubkeyHex, ok } = verifyFilterBlob(forged)
+    // The blob is internally consistent — ok:true...
+    expect(ok).toBe(true)
     // ...but the signer is the attacker, NOT the server we pinned.
     expect(signerPubkeyHex).toBe(ATTACKER.pubHex)
 
-    // A consumer MUST compare against the pinned/known server key. valid:true is
+    // A consumer MUST compare against the pinned/known server key. ok:true is
     // NOT trust. This pinned-key comparison is what defeats forged-filter doxxing.
     const PINNED_SERVER_PUBKEY = SERVER.pubHex
-    const trusted = valid && signerPubkeyHex === PINNED_SERVER_PUBKEY
+    const trusted = ok && signerPubkeyHex === PINNED_SERVER_PUBKEY
     expect(trusted).toBe(false) // rejected: attacker's key ≠ pinned key
     expect(signerPubkeyHex).not.toBe(PINNED_SERVER_PUBKEY)
   })
 
   it('the same check ACCEPTS a blob signed by the pinned key', () => {
     const { blob } = signedBlob(25, 78)
-    const { signerPubkeyHex, valid } = verifyFilterBlob(blob)
+    const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
     const PINNED_SERVER_PUBKEY = SERVER.pubHex
-    expect(valid && signerPubkeyHex === PINNED_SERVER_PUBKEY).toBe(true)
+    expect(ok && signerPubkeyHex === PINNED_SERVER_PUBKEY).toBe(true)
   })
 })
 
 describe('verifyFilterBlob — malformed input does not throw', () => {
-  it('too-short blob (< 128 bytes) → valid:false, no throw', () => {
+  it('too-short blob (< 128 bytes) → ok:false, no throw', () => {
     for (const len of [0, 1, 32, 64, 127]) {
-      const { valid, signerPubkeyHex } = verifyFilterBlob(new Uint8Array(len))
-      expect(valid).toBe(false)
+      const { ok, signerPubkeyHex } = verifyFilterBlob(new Uint8Array(len))
+      expect(ok).toBe(false)
       expect(signerPubkeyHex).toBe('')
     }
   })
 
-  it('a 128-byte all-zero blob (zero pubkey, zero sig) → valid:false, no throw', () => {
-    const { valid } = verifyFilterBlob(new Uint8Array(128))
-    expect(valid).toBe(false)
+  it('a 128-byte all-zero blob (zero pubkey, zero sig) → ok:false, no throw', () => {
+    const { ok } = verifyFilterBlob(new Uint8Array(128))
+    expect(ok).toBe(false)
   })
 
-  it('random 128-byte garbage → valid:false, no throw', () => {
+  it('random 128-byte garbage → ok:false, no throw', () => {
     const b = new Uint8Array(200)
     for (let i = 0; i < b.length; i++) b[i] = (i * 73 + 11) & 0xff
     expect(() => verifyFilterBlob(b)).not.toThrow()
-    expect(verifyFilterBlob(b).valid).toBe(false)
+    expect(verifyFilterBlob(b).ok).toBe(false)
   })
 })

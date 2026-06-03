@@ -1,15 +1,32 @@
 {
-  "name": "tessera-kit",
+  "name": "@forgesworn/tessera-kit",
   "version": "0.1.0",
   "description": "Privacy-preserving membership-presence filter — build, test, sign, and serialize a non-enumerable Binary Fuse filter so clients answer \"is this person here?\" locally.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./capability": { "types": "./dist/capability.d.ts", "default": "./dist/capability.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./capability": {
+      "types": "./dist/capability.d.ts",
+      "default": "./dist/capability.js"
+    },
+    "./nostr": {
+      "types": "./dist/nostr.d.ts",
+      "default": "./dist/nostr.js"
+    }
   },
-  "files": ["dist", "LICENSE", "llms.txt", "README.md", "PROTOCOL.md", "SECURITY.md"],
+  "files": [
+    "dist",
+    "LICENSE",
+    "llms.txt",
+    "README.md",
+    "PROTOCOL.md",
+    "SECURITY.md"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -17,14 +34,39 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["membership", "filter", "binary-fuse", "presence", "privacy", "nostr", "schnorr"],
+  "keywords": [
+    "membership",
+    "filter",
+    "binary-fuse",
+    "presence",
+    "privacy",
+    "nostr",
+    "schnorr"
+  ],
   "author": "forgesworn",
   "license": "MIT",
   "sideEffects": false,
-  "engines": { "node": ">=22" },
-  "dependencies": { "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1" },
-  "devDependencies": { "typescript": "^6.0.2", "vitest": "^4.1.0" },
-  "publishConfig": { "provenance": true },
-  "funding": { "type": "lightning", "url": "lightning:thedonkey@strike.me" },
-  "repository": { "type": "git", "url": "https://github.com/forgesworn/tessera-kit.git" }
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@noble/hashes": "^2.0.1",
+    "@scure/base": "^2.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.0"
+  },
+  "publishConfig": {
+    "provenance": true
+  },
+  "funding": {
+    "type": "lightning",
+    "url": "lightning:thedonkey@strike.me"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/forgesworn/tessera-kit.git"
+  }
 }

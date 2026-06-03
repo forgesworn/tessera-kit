@@ -45,6 +45,19 @@ function keyedFilterFor(
   return buildMembershipFilter(memberValues, { epoch: EPOCH, salt })
 }
 
+/** Build an OPEN pool (no salt ⇒ keyed flag false) whose member set is the given
+ *  pubkeys transformed via the BARE open-pool form `memberKey(pk)`. This is the
+ *  exact form an `saltHint:''` capability must match against (audit fix): an
+ *  empty-hint capability is an OPEN-pool capability, so its membership value is
+ *  `memberKey(subjectPub)` (bare), NOT `memberKey(subjectPub, '')` (= sha256('' ‖ pk)). */
+function openFilterFor(includedPubHex: string[], extra = 20) {
+  const noise = Array.from({ length: extra }, (_, i) =>
+    bytesToHex(sha256(new Uint8Array([i & 255, (i >> 8) & 255, 0x0d]))),
+  )
+  const memberValues = [...includedPubHex, ...noise].map((pk) => memberKey(pk))
+  return buildMembershipFilter(memberValues, { epoch: EPOCH, fingerprintBits: 16 })
+}
+
 function baseParams() {
   return {
     serverId: SERVER_ID,
@@ -75,6 +88,36 @@ describe('issuePresenceCapability / testWithCapability — round-trip', () => {
   it('tests false against a keyed filter that does NOT include the subject', () => {
     const cap = issuePresenceCapability(baseParams(), SUBJECT.privHex)
     const f = keyedFilterFor([], SALT) // subject absent, only noise
+    expect(testWithCapability(f, cap, EPOCH)).toBe(false)
+  })
+})
+
+// --- empty saltHint ⇒ OPEN-pool capability matches a real open pool (audit fix) --
+//
+// SECURITY.md §6: "saltHint = '' corresponds to an open-pool capability (the value
+// tested is the open-pool form)." Before the fix, testWithCapability ALWAYS computed
+// `memberKey(subjectPubHex, saltHint)`, so for an empty hint it produced
+// `memberKey(pk, '') = sha256('' ‖ pk)` — which is NEVER in an open pool built over
+// the bare `memberKey(pk)`. The capability therefore could never match an open pool,
+// a false-negative the docs explicitly claimed didn't exist. These tests pin the
+// documented behaviour: an empty-hint cap is tested against the BARE open-pool value.
+
+describe('testWithCapability — empty saltHint matches an OPEN pool (audit fix)', () => {
+  it('tests TRUE against a real open pool that INCLUDES the bare memberKey(subjectPub)', () => {
+    const cap = issuePresenceCapability(
+      { ...baseParams(), saltHint: '' },
+      SUBJECT.privHex,
+    )
+    const f = openFilterFor([SUBJECT.pubHex]) // open pool built over memberKey(pk)
+    expect(testWithCapability(f, cap, EPOCH)).toBe(true)
+  })
+
+  it('tests FALSE against an open pool that does NOT include the subject', () => {
+    const cap = issuePresenceCapability(
+      { ...baseParams(), saltHint: '' },
+      SUBJECT.privHex,
+    )
+    const f = openFilterFor([]) // subject absent, only noise
     expect(testWithCapability(f, cap, EPOCH)).toBe(false)
   })
 })

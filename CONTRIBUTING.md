@@ -48,7 +48,7 @@ and `@forgesworn/tessera-kit/nostr`.
   `Error` on any malformation)
 - **No `console.*` in library code** — `src/` is silent; the `scripts/` checkers may log
 - **Relationship-agnostic** — this package knows nothing about relationships,
-  personas, or Nostr *kinds*. That layer lives in `@forgesworn/kindred`.
+  personas, or Nostr *kinds*. That layer lives in `@forgesworn/kenspeckle`.
 
 ## Frozen golden vectors
 

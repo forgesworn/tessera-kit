@@ -11,7 +11,7 @@ tessera-kit is a TypeScript library for non-enumerable membership-presence
 filters, built on a clean-room Binary Fuse 16 port with a custom signed byte
 format (`KFLT`). ESM-only, Node ≥ 22. Two deps: `@noble/curves`, `@noble/hashes`.
 It is the membership-presence brick of the Forgesworn / Signet ecosystem and is
-consumed by `kindred` (relationships + discovery).
+consumed by `kenspeckle` (relationships + discovery).
 
 ## Getting Started
 
@@ -80,4 +80,4 @@ forged filter is a doxxing primitive. Full posture in SECURITY.md.
 - [README](https://github.com/forgesworn/tessera-kit/blob/main/README.md): usage guide with examples
 - [PROTOCOL.md](https://github.com/forgesworn/tessera-kit/blob/main/PROTOCOL.md): KFLT byte layout, fuse construction + seed scheme, signing digest, capability bytes, Nostr publication shape, FPR math
 - [SECURITY.md](https://github.com/forgesworn/tessera-kit/blob/main/SECURITY.md): honest privacy posture (keyed = speed-bump; pin-verify mandatory; accumulation budget)
-- [kindred](https://github.com/forgesworn/kindred): relationships + discovery primitive that consumes tessera-kit
+- [kenspeckle](https://github.com/forgesworn/kenspeckle): relationships + discovery primitive that consumes tessera-kit

@@ -44,10 +44,40 @@ memberKey(pubkeyHex, saltHex)   = hex( sha256( bytes(saltHex) ‖ bytes(pubkeyHe
 ```
 
 - `pubkeyHex` MUST be 64 lowercase hex chars (validated).
-- `saltHex` MUST be even-length hex (may be empty; empty salt ⇒ keyed value =
-  `sha256("" ‖ pk)`, still distinct from the open value `pk`).
+- `saltHex` MUST be **non-empty**, even-length hex (follow-up audit fix — see
+  below). Passing `saltHex` at all routes into the keyed branch; **omit it
+  entirely** for the open-pool form.
 - The salt is **never** placed in the blob. It is distributed out-of-band. The
   blob's `keyed` flag only signals "test values were salted."
+
+**`saltHex` MUST be non-empty (follow-up audit fix).** An earlier revision of
+this document (and of `memberKey` itself) allowed `saltHex: ''`, producing
+`sha256('' ‖ pk)` as "a keyed value, distinct from the open value `pk`." That
+was true bytewise but not meaningfully: `sha256('' ‖ pk)` is computable by
+**anyone** who holds the bare pubkey — no out-of-band salt is needed — so it
+provides NONE of the speed-bump a keyed pool exists for. `memberKey` now
+**rejects** an empty `saltHex` outright (`'memberKey: salt must be non-empty
+even-length hex'`), the same as a non-hex or odd-length one. This propagates
+everywhere `memberKey`'s keyed branch is reachable: `issuePresenceCapability({
+salt: '' })` (`./capability`, §5) now throws too, via its own
+`memberKey(subjectPubHex, p.salt)` call — an issuer can no longer mint a
+"keyed" capability whose `memberValue` gives away nothing an unkeyed one
+wouldn't. **To build an open pool, omit `saltHex`/`salt` entirely — never pass
+`''`.**
+
+**`buildMembershipFilter`'s `opts.salt` is validated too, by the SAME rule
+(audit fix, L4).** `buildMembershipFilter` never uses `opts.salt`'s bytes for
+anything (§2's construction module note) — it only tests `opts.salt !==
+undefined` to set the on-wire `keyed` flag (the caller is expected to have
+already salted the member-key values it hands in, via `memberKey(pk, salt)`,
+before calling `buildMembershipFilter`). Before the fix, an unvalidated
+`opts.salt: ''` or `opts.salt: 'zz'` both silently set `keyed: true`
+regardless of whether anything resembling a real salt was passed. `opts.salt`,
+when supplied, is now required to be **non-empty, even-length hex** — the
+kit's ONE definition of what a salt looks like (`isValidSaltHex`,
+`member-key.ts`), shared by `memberKey` and this check rather than
+independently duplicated — so the `keyed` flag can no longer be set from a
+value that could not plausibly BE a salt.
 
 ---
 
@@ -144,9 +174,31 @@ XOR-accumulating the hash per slot); repeatedly remove keys from slots that hold
 exactly one; record the peel order. If all `n` keys peel, assign fingerprints in
 **reverse** peel order — each peeled key's owned slot gets
 `fingerprint16(hash) XOR (fingerprints of its other two slots)`. If a seed fails
-to peel all keys, advance the seed (`next32`) and retry. Callers MUST pass
-**distinct** keys (duplicates break peeling — `buildMembershipFilter`
-de-duplicates first).
+to peel all keys, advance the seed (`next32`) and retry.
+
+**Duplicate keys break peeling — de-duplication happens at TWO levels (M1,
+audit fix).** `buildMembershipFilter` de-duplicates member-key STRINGS first
+(§1). That alone is not enough: two DISTINCT key strings can still collide on
+`keyToU64` (§2.1) — the 64-bit hash is sha256-derived, so a collision is
+~2^-64 by chance, but findable by a targeted birthday search over ~2^32
+attempts (feasible; see review notes). A colliding pair lands in the SAME
+three slots on EVERY seed (the slots are a pure function of the hash, not the
+seed — §2.2/§2.3), so their slot counts never drop below 2 and peeling never
+converges — before this fix, `build()` threw `'fuse: construction failed to
+converge'` on every call once such a pair existed in the input, for as long as
+both keys remained (an availability bug: any attacker who can register two
+colliding keys — e.g. two pubkeys on an OPEN pool, where the member key is the
+pubkey itself — blocks every future publication for that pool). `build()`
+therefore ALSO de-duplicates by 64-bit HASH VALUE, computed once
+(seed-independent, §2.1) before the seed/peel loop: the Lemire reference C
+does this same de-duplication on the raw keys before `populate()`
+(`binary_fuse_sort_and_remove_dup`); this port previously did not. Dropping a
+hash-duplicate is SAFE and changes nothing observable — `contains()` (§2.6) is
+a pure function of `keyToU64(key)`, so both colliding keys still test `true`
+after only one insertion of their shared hash. Geometry (§2.4) and the
+peeled/inserted count `n` are computed from the DEDUPED hash count, not the
+raw input length; when there are no hash collisions (the overwhelmingly common
+case) this is a no-op and the resulting blob is unchanged.
 
 ### 2.6 Query
 
@@ -208,6 +260,17 @@ then diffs *exactly* across epochs, because there is nothing else in the mix.
 (32 hex chars); a shorter, odd-length, or non-hex seed throws rather than
 producing public/predictable decoys or a raw `RangeError` (audit fix, B10).
 
+**`deriveDecoys` itself also validates its `decoySeedHex` argument (audit fix,
+L4).** `deriveDecoys` is a public export (the `.` barrel and `padding.ts`),
+reachable directly by a caller who bypasses `buildMembershipFilter` entirely —
+so it cannot rely on `assertDecoySeedHex` above (a `filter.ts`-local check).
+It requires `decoySeedHex` to be **non-empty, well-formed, even-length hex**
+(an empty seed is a distinct bug from B10's "too short": `hexToBytes('')` was
+previously silently accepted, producing PUBLIC, PREDICTABLE decoys with no
+`RangeError` to catch). This is a weaker requirement than
+`buildMembershipFilter`'s own >=16-byte minimum above — that minimum is
+specific to the build path and is not re-imposed on `deriveDecoys` itself.
+
 ---
 
 ## 3. `KFLT` blob byte format (v1)
@@ -241,6 +304,13 @@ Notes:
 - The salt is **not** in the blob (§1). `flags.keyed` only signals the values
   were salted.
 - `epoch` (offset 8) is a non-negative safe integer on write and read — see §3.2.
+- **`serializeFilter` enforces the `KFLT_MAX_BLOB_BYTES` cap on its OWN output
+  too (audit fix, L4)** — checked BEFORE allocating the output buffer. Without
+  it, a filter whose true member count pushed `arrayLength` high enough (e.g.
+  a true count above ~2^24 with default padding) could produce a blob that
+  `parseFilter` (§3.1 step 1) and `verifyFilterBlob` (§4.2) would both reject
+  anyway; `serializeFilter` now fails loudly at the source instead of handing
+  back bytes no consumer can use.
 
 ### 3.1 `parseFilter` hardening (the trust boundary)
 
@@ -320,9 +390,21 @@ the private-key byte copy in a `finally`.
 
 - reads `signer_pubkey` from `[32,64)` and `sig` from `[64,128)`, recomputes the
   digest (§4.1), returns `ok = schnorr.verify(sig, digest, signer_pubkey)`;
-- never throws on hostile input: a `< 128`-byte blob returns
-  `{ signerPubkeyHex: '', ok: false }`; a malformed sig/pubkey yields
-  `ok:false`.
+- never throws on hostile input: a `< 128`-byte OR a `> 64 MiB`
+  (`KFLT_MAX_BLOB_BYTES`) blob returns `{ signerPubkeyHex: '', ok: false }`; a
+  malformed sig/pubkey yields `ok:false`.
+
+**L1 audit fix — the size cap is checked BEFORE any hashing.** `computeDigest`
+(§4.1) SHA-256s the entire `blob[128..end)` fingerprint region unconditionally.
+Before the fix, a raw-HTTPS caller who called `verifyFilterBlob` directly (not
+gated by `parseFilter`, whose own `KFLT_MAX_BLOB_BYTES` check only runs later,
+in `verifyAndParseFilter`, and only AFTER `verifyFilterBlob` had already done
+the hashing/verify work) paid the full hashing cost for an oversized hostile
+blob — measured at ~870 ms for a 200 MB blob — before it was ever rejected.
+`verifyFilterBlob` now rejects `blob.length > KFLT_MAX_BLOB_BYTES` up front,
+alongside the existing too-short check, so an oversized blob is turned away
+before any hashing happens. This also protects `verifyAndParseFilter` (§4.3),
+which calls `verifyFilterBlob` first.
 
 > **`ok:true` is NOT trust.** It means only "this blob carries an
 > internally-consistent BIP340 signature by `signerPubkeyHex`." Anyone can mint a
@@ -447,6 +529,26 @@ two distinct tuples produce identical preimage bytes.
 > (§4) and choose actually-unique `serverId` values per deployment if that
 > distinction matters.
 
+**`serverId` encoding — byte-exact, NO Unicode normalisation (L3, audit fix).**
+The canonical preimage (§5.2) embeds `serverId` via `utf8(serverId)`
+(`TextEncoder`). This encoding is **byte-exact**: it does **not** apply any
+Unicode normalisation (no NFC/NFD/NFKC/NFKD), so two strings that are
+canonically equivalent but not byte-identical (e.g. a precomposed vs.
+decomposed accented character) produce **different** preimages and therefore
+different signatures — a cross-language re-implementer MUST match this exactly
+(no normalisation step) or signatures will not interoperate. Separately,
+`TextEncoder` silently replaces an **unpaired UTF-16 surrogate** with U+FFFD
+(the replacement character) rather than throwing, which means two DIFFERENT
+JS strings — e.g. `"a\uD800"` (a lone high surrogate) and `"a�"` (the
+literal replacement character) — previously encoded to IDENTICAL UTF-8 bytes,
+so a capability issued for one verified when presented as the other. `serverId`
+is therefore now validated to be **well-formed UTF-16** (no lone surrogates) on
+both issue and test, rejecting the collision at the input boundary instead of
+downstream at the byte level. **Recommendation: restrict `serverId` to
+printable ASCII** — it sidesteps both the normalisation question and any
+further Unicode edge cases entirely, and is sufficient for the intended use
+(a bare host or a hex hash, §5.3 above).
+
 ### 5.4 Test order (load-bearing)
 
 `testWithCapability(filter, cap, now?)` checks, in order: (1) field shapes,
@@ -481,6 +583,40 @@ courtesy bound on the wrapper function's behaviour, not a cryptographic limit
 on how long a disclosed `memberValue` stays testable against the underlying
 filter.
 
+### 5.4b `memberValue` is bound to `subjectPubHex` on an OPEN pool only — an inherent limit on a keyed one (M2, audit fix)
+
+The subject's signature (§5.2) proves "the subject named by `subjectPubHex`
+signed this exact `{serverId, subjectPubHex, memberValue, expiresAt}` tuple."
+It does **not**, by itself, prove that `memberValue` is actually *derived
+from* `subjectPubHex` — nothing stops a signer from naming their own
+`subjectPubHex` while setting `memberValue` to a **different** subject's pool
+value (e.g. Alice signs `{subjectPubHex: alice, memberValue: bob}`); the
+signature still verifies, because it only proves Alice signed that tuple, not
+that the tuple's `memberValue` belongs to her. Without a check, a bearer would
+be told "Alice is present" when the hit is really Bob's presence — disclosed
+without Bob's consent.
+
+`testWithCapability` therefore checks the binding directly, but **only when
+it can**:
+
+- **Open pool (`!filter.keyed`):** `memberValue` MUST equal `subjectPubHex`
+  (case-insensitive) — that is the open-pool form of `memberKey` (§1), the
+  only legitimate open-pool `memberValue`. `testWithCapability` rejects a
+  mismatch with `'capability: memberValue does not match subjectPubHex (open
+  pool)'`, checked AFTER expiry and signature (§5.4) and BEFORE the membership
+  test.
+- **Keyed pool (`filter.keyed`):** `memberValue = memberKey(subjectPubHex,
+  salt)`, and the bearer — by the design of a keyed pool — never holds
+  `salt`. There is therefore **no way** for `testWithCapability` to recompute
+  `memberKey(subjectPubHex, salt)` and check it against `memberValue`; nothing
+  in this check's possession can perform that binding. **This is an inherent
+  limit of the keyed-pool design, not a gap a future patch to this function
+  can close from the bearer's side.** On a keyed pool, the subject's signature
+  is the ONLY assertion available that `memberValue` is theirs, and a consumer
+  must trust it as such — the same trust boundary as `memberValue` itself
+  (§5.1): a subject who signs a bad tuple is misusing their OWN signing key,
+  which is a different threat model from a bearer forging one.
+
 ### 5.5 Audit fixes (v1 → v2)
 
 - **The salt is no longer carried (B1, HIGH).** v1's `saltHint` field WAS the
@@ -499,12 +635,24 @@ filter.
   the fix, an injected `now = NaN` made `NaN > expiresAt` evaluate to `false`,
   silently skipping the expiry check and letting an already-expired capability
   pass.
+- **`memberValue` is bound to `subjectPubHex` on an OPEN pool (M2)** (§5.4b) —
+  before the fix, `testWithCapability` never checked that an open-pool
+  `memberValue` actually equalled `subjectPubHex`, so a validly-signed tuple
+  naming one subject's pubkey while carrying a DIFFERENT subject's
+  `memberValue` would test that other subject's presence and report it under
+  the wrong name. Not fixable on a keyed pool — see §5.4b for why.
+- **Every field is `typeof`-checked before use** (both `issuePresenceCapability`
+  and `testWithCapability`) — before the fix, a non-string field (e.g. a
+  hand-built capability with `sig: undefined`) reached a `.toLowerCase()` call
+  directly and threw a raw `TypeError` instead of a `capability:`-prefixed
+  kit error.
 
 ### 5.6 See also
 
 `SECURITY.md` §6 restates the bearer-token / consent-not-provenance framing for
 the honest-privacy-posture reader; the `serverId`-is-not-filter-bound note above
-is sometimes referenced informally as "B11" in issue tracking.
+is sometimes referenced informally as "B11" in issue tracking, and the
+`memberValue`/`subjectPubHex` binding note (§5.4b) as "M2".
 
 ---
 
@@ -578,12 +726,20 @@ non-members false-hits at a rate `< 5e-4` (near the 1.5e-5 ideal).
 
 ### 7.2 Accumulation across a sweep
 
-For a consumer testing `c` candidate keys against `S`-member servers across a
-sweep, the expected number of false "present" hits is
+For a consumer testing `c` candidate keys against `S` **servers** (i.e. `S`
+separate filters probed in the sweep — `S` is a SERVER COUNT, not a member
+count; the per-test FPR `p` above is independent of how many members are in
+any one filter), the expected number of false "present" hits across the whole
+sweep is
 
 ```
 E[false hits] = c · S · p
 ```
+
+(doc fix: earlier revisions of this document described `S` as "`S`-member
+servers," which reads as if `p` scaled with a filter's member count — it does
+not, §7.1 — or as if `S` were itself a member count. `S` is the number of
+servers/filters the `c` candidates are each tested against.)
 
 The headline example (`c = 100`, `S = 1000`):
 

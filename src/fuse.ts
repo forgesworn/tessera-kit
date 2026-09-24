@@ -144,17 +144,56 @@ export class BinaryFuse16 {
 
   /** Build a Binary Fuse 16 filter over the given (distinct) hex member keys.
    *  Throws if peeling fails to converge within MAX_ATTEMPTS seeded attempts.
-   *  Callers MUST de-duplicate keys first (duplicates break peeling). */
+   *  Callers SHOULD de-duplicate key STRINGS first (`buildMembershipFilter`
+   *  does) — but see the HASH-level dedup below, which this function performs
+   *  regardless, since a string-level dedup alone is not enough (audit fix M1). */
   static build(memberKeys: string[]): BinaryFuse16 {
-    const n = memberKeys.length
-    const geom = computeGeometry(n)
-    const { segmentLength, arrayLength } = geom
+    const rawN = memberKeys.length
 
     // Precompute the 64-bit key hashes once (independent of seed input).
-    const keyHashes = new BigUint64Array(n)
-    for (let i = 0; i < n; i++) {
-      keyHashes[i] = keyToU64(memberKeys[i] as string)
+    const rawHashes = new BigUint64Array(rawN)
+    for (let i = 0; i < rawN; i++) {
+      rawHashes[i] = keyToU64(memberKeys[i] as string)
     }
+
+    // De-duplicate by 64-bit HASH, not by key string (audit fix M1). Two
+    // distinct member keys can collide on `keyToU64` (sha256-derived; ~2^-64
+    // per pair by chance, but findable by a targeted birthday search over
+    // ~2^32 attempts — see review.md M1, and `coll.mjs` in the audit
+    // scratchpad, which demonstrates the attack against a truncated-hash
+    // stand-in). A colliding pair lands in the SAME three slots on every seed
+    // (the slots are a pure function of the hash), so every count at those
+    // slots stays >= 2 forever and peeling never converges — `build()` throws
+    // on every call once such a pair is present in the input, for as long as
+    // both keys remain. The Lemire reference C removes duplicate raw keys
+    // before `populate()` for exactly this reason
+    // (`binary_fuse_sort_and_remove_dup` in the upstream `hashing.h`); this
+    // port did not, until now.
+    //
+    // Dropping the duplicate here is SAFE and changes nothing observable:
+    // `contains()` is a pure function of `keyToU64(key)` — it re-derives the
+    // same hash, same slots, same fingerprint check for either original key —
+    // so inserting the hash a second time would add no information, and both
+    // colliding keys still test `true` after only one insertion.
+    //
+    // Ordering (and therefore the golden vector) is UNCHANGED in the common
+    // case: a `Set`-based dedup preserves first-seen order, so when there are
+    // no collisions (the overwhelmingly common case) `keyHashes` is identical
+    // to `rawHashes` and this is a no-op.
+    const seenHashes = new Set<bigint>()
+    const dedupedHashes: bigint[] = []
+    for (let i = 0; i < rawN; i++) {
+      const h = rawHashes[i] as bigint
+      if (!seenHashes.has(h)) {
+        seenHashes.add(h)
+        dedupedHashes.push(h)
+      }
+    }
+    const n = dedupedHashes.length
+    const keyHashes = BigUint64Array.from(dedupedHashes)
+
+    const geom = computeGeometry(n)
+    const { segmentLength, arrayLength } = geom
 
     // Construction scratch.
     const t2count = new Uint8Array(arrayLength)

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { bytesToHex } from '@noble/hashes/utils.js'
+import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { buildMembershipFilter } from './filter.js'
 import { memberKey } from './member-key.js'
@@ -121,6 +121,81 @@ describe('issuePresenceCapability — omitted salt matches an OPEN pool', () => 
     )
     const f = openFilterFor([]) // subject absent, only noise
     expect(testWithCapability(f, cap, EPOCH)).toBe(false)
+  })
+})
+
+// --- M2 audit fix: memberValue bound to subjectPubHex on an OPEN pool ----
+//
+// Before the fix, `testWithCapability` checked only that the SUBJECT signed
+// the tuple — never that `memberValue` was actually derived FROM
+// `subjectPubHex`. Alice can validly sign a tuple naming her own
+// `subjectPubHex` while setting `memberValue` to Bob's pool value; the
+// signature checks out (it only proves Alice signed THAT tuple), so a bearer
+// would be told "Alice is present" when the hit is really Bob's presence,
+// disclosed without Bob's consent. On an open pool `memberValue` MUST equal
+// `subjectPubHex` (§5.1), so this is now checked and rejected directly. On a
+// keyed pool there is no salt to check the binding with — see the module note
+// and the doc comment on `testWithCapability` for why that side is an
+// inherent limit, not a bug.
+
+describe('M2 — testWithCapability binds memberValue to subjectPubHex on an OPEN pool', () => {
+  /** Hand-sign a capability tuple exactly like `issuePresenceCapability` does,
+   *  bypassing its internal `memberValue = memberKey(subjectPubHex, salt)`
+   *  derivation — lets a test construct an internally-consistent (validly
+   *  signed) capability whose `memberValue` is a DIFFERENT subject's value
+   *  than the one named in `subjectPubHex`. */
+  function handSignCapability(p: {
+    serverId: string
+    subjectPubHex: string
+    memberValue: string
+    expiresAt: number
+  }, signerPrivHex: string): PresenceCapability {
+    const preimage = utf8ToBytes(
+      `tessera-cap:v2:${p.serverId}:${p.subjectPubHex}:${p.memberValue}:${p.expiresAt}`,
+    )
+    const digest = sha256(preimage)
+    const sig = bytesToHex(schnorr.sign(digest, hexToBytes(signerPrivHex)))
+    return { ...p, sig }
+  }
+
+  it('throws when Alice signs a tuple naming her own subjectPubHex but Bob\'s memberValue (open pool)', () => {
+    const ALICE = SUBJECT
+    const BOB = keypairFromSeed(0x62)
+    const forged = handSignCapability(
+      {
+        serverId: SERVER_ID,
+        subjectPubHex: ALICE.pubHex,
+        memberValue: BOB.pubHex, // open-pool memberValue IS the bare pubkey
+        expiresAt: EPOCH + 3600,
+      },
+      ALICE.privHex,
+    )
+    // Sanity: the forged capability is internally consistent (Alice really
+    // did sign this exact tuple) — the sig alone would pass.
+    const f = openFilterFor([ALICE.pubHex, BOB.pubHex])
+    expect(f.keyed).toBe(false)
+    expect(() => testWithCapability(f, forged, EPOCH)).toThrow(
+      'capability: memberValue does not match subjectPubHex (open pool)',
+    )
+  })
+
+  it('honest open-pool capabilities (memberValue === subjectPubHex) are unaffected', () => {
+    const cap = issuePresenceCapability(
+      { serverId: SERVER_ID, subjectPubHex: SUBJECT.pubHex, expiresAt: EPOCH + 3600 },
+      SUBJECT.privHex,
+    )
+    expect(cap.memberValue).toBe(SUBJECT.pubHex)
+    const f = openFilterFor([SUBJECT.pubHex])
+    expect(testWithCapability(f, cap, EPOCH)).toBe(true)
+  })
+
+  it('honest keyed-pool capabilities are unaffected (no binding check on a keyed pool)', () => {
+    const cap = issuePresenceCapability(baseParams(), SUBJECT.privHex)
+    expect(cap.memberValue).toBe(memberKey(SUBJECT.pubHex, SALT))
+    expect(cap.memberValue).not.toBe(SUBJECT.pubHex) // keyed value, not the bare pubkey
+    const f = keyedFilterFor([SUBJECT.pubHex], SALT)
+    expect(f.keyed).toBe(true)
+    expect(testWithCapability(f, cap, EPOCH)).toBe(true)
   })
 })
 
@@ -255,6 +330,74 @@ describe('colon-in-serverId rejection (delimiter-injection guard)', () => {
   })
 })
 
+// --- L3 audit fix: lone UTF-16 surrogates in serverId ---------------------
+//
+// `utf8ToBytes` (TextEncoder) silently turns an unpaired surrogate into U+FFFD
+// (the replacement character), so "a\uD800" (a lone high surrogate) and
+// "a�" (the literal replacement char) previously encoded to IDENTICAL
+// UTF-8 bytes and so produced an IDENTICAL canonical preimage/digest — a
+// capability issued for one verified when presented under the other.
+
+describe('L3 — assertServerId rejects a lone (unpaired) UTF-16 surrogate', () => {
+  it('issuePresenceCapability throws when serverId contains a lone high surrogate', () => {
+    expect(() =>
+      issuePresenceCapability(
+        { ...baseParams(), serverId: 'a\uD800' },
+        SUBJECT.privHex,
+      ),
+    ).toThrow(/surrogate/)
+  })
+
+  it('issuePresenceCapability throws when serverId contains a lone low surrogate', () => {
+    expect(() =>
+      issuePresenceCapability(
+        { ...baseParams(), serverId: 'a\uDC00' },
+        SUBJECT.privHex,
+      ),
+    ).toThrow(/surrogate/)
+  })
+
+  it('a well-formed surrogate PAIR (an actual astral character) is accepted', () => {
+    // U+1F600 GRINNING FACE, as a JS string, is the surrogate pair 😀
+    // — a valid, well-formed code point, not a lone surrogate.
+    expect(() =>
+      issuePresenceCapability(
+        { ...baseParams(), serverId: 'srv-😀' },
+        SUBJECT.privHex,
+      ),
+    ).not.toThrow()
+  })
+
+  it('a capability honestly issued for the U+FFFD replacement character does NOT verify when presented as the lone surrogate it is not (the collision the fix closes)', () => {
+    // Before the fix, `assertServerId` accepted BOTH "a�" and "a\uD800"
+    // and `utf8ToBytes` mapped them to the same bytes, so a capability issued
+    // under one string's canonical digest would still verify under the other.
+    // After the fix, "a\uD800" is rejected outright — the two strings can no
+    // longer collide because the lone-surrogate form is never accepted at all.
+    const cap = issuePresenceCapability(
+      { ...baseParams(), serverId: 'a�' },
+      SUBJECT.privHex,
+    )
+    const f = keyedFilterFor([SUBJECT.pubHex], SALT)
+    expect(testWithCapability(f, cap, EPOCH)).toBe(true) // honest use still works
+    expect(() =>
+      testWithCapability(f, { ...cap, serverId: 'a\uD800' }, EPOCH),
+    ).toThrow(/surrogate/) // the collision path is now rejected before it can match
+  })
+
+  it('testWithCapability rejects a hand-crafted cap whose serverId contains a lone surrogate', () => {
+    const cap: PresenceCapability = {
+      serverId: 'a\uD800',
+      subjectPubHex: SUBJECT.pubHex,
+      memberValue: memberKey(SUBJECT.pubHex, SALT),
+      expiresAt: EPOCH + 3600,
+      sig: '00'.repeat(64),
+    }
+    const f = keyedFilterFor([SUBJECT.pubHex], SALT)
+    expect(() => testWithCapability(f, cap, EPOCH)).toThrow(/surrogate/)
+  })
+})
+
 // --- pubkey-matches-priv assertion ---------------------------------------
 
 describe('issuePresenceCapability — subjectPubHex must match subjectPrivHex', () => {
@@ -335,13 +478,14 @@ describe('issuePresenceCapability — field validation', () => {
     ).toThrow()
   })
 
-  it('accepts an EMPTY salt string as an even-length-hex keyed salt (memberKey("" ‖ pk))', () => {
-    // salt '' is even-length hex, distinct from omitting `salt` entirely: it
-    // still routes through memberKey's KEYED branch (`saltHex !== undefined`),
-    // producing sha256('' || pk) — NOT the open-pool bare-pubkey form.
-    const cap = issuePresenceCapability({ ...baseParams(), salt: '' }, SUBJECT.privHex)
-    expect(cap.memberValue).toBe(memberKey(SUBJECT.pubHex, ''))
-    expect(cap.memberValue).not.toBe(SUBJECT.pubHex)
+  // Follow-up audit fix: an EMPTY salt makes the "keyed" value sha256('' ‖ pk),
+  // computable by anyone from the bare pubkey alone — no protection at all —
+  // so `memberKey` now rejects it outright, and `issuePresenceCapability`
+  // throws too (it derives `memberValue` via `memberKey(subjectPubHex, p.salt)`).
+  it('rejects an EMPTY salt string (propagated from memberKey)', () => {
+    expect(() => issuePresenceCapability({ ...baseParams(), salt: '' }, SUBJECT.privHex)).toThrow(
+      'memberKey: salt must be non-empty even-length hex',
+    )
   })
 
   it('omitting salt entirely yields the BARE open-pool memberValue (subjectPubHex itself)', () => {
@@ -376,6 +520,65 @@ describe('testWithCapability — field validation', () => {
   it('throws on a non-hex sig', () => {
     const cap: PresenceCapability = { ...issuePresenceCapability(baseParams(), SUBJECT.privHex), sig: 'nothex' }
     expect(() => testWithCapability(f(), cap, EPOCH)).toThrow()
+  })
+})
+
+// --- L4 audit fix: typeof checks — a non-string field throws a capability ---
+// --- error, not a raw TypeError --------------------------------------------
+//
+// Before the fix, e.g. `sig: undefined` (a plausible shape a caller could hand
+// in from a partially-filled object, or a JSON payload with a missing field)
+// reached `cap.sig.toLowerCase()` directly and threw
+// `TypeError: Cannot read properties of undefined (reading 'toLowerCase')` —
+// an un-kit-shaped error that could not be distinguished from a genuine bug.
+
+describe('L4 — non-string fields throw a capability-shaped error, not a raw TypeError (issue)', () => {
+  it('rejects a non-string subjectPrivHex', () => {
+    expect(() => issuePresenceCapability(baseParams(), undefined as unknown as string)).toThrow(
+      'capability: subjectPrivHex must be a string',
+    )
+    expect(() => issuePresenceCapability(baseParams(), 12345 as unknown as string)).toThrow(
+      'capability: subjectPrivHex must be a string',
+    )
+  })
+
+  it('rejects a non-string subjectPubHex', () => {
+    expect(() =>
+      issuePresenceCapability(
+        { ...baseParams(), subjectPubHex: undefined as unknown as string },
+        SUBJECT.privHex,
+      ),
+    ).toThrow('capability: subjectPubHex must be a string')
+  })
+
+  it('rejects a non-string salt (when provided)', () => {
+    expect(() =>
+      issuePresenceCapability({ ...baseParams(), salt: 12345 as unknown as string }, SUBJECT.privHex),
+    ).toThrow('capability: salt must be a string')
+  })
+})
+
+describe('L4 — non-string fields throw a capability-shaped error, not a raw TypeError (test)', () => {
+  const f = () => keyedFilterFor([SUBJECT.pubHex], SALT)
+  const cap0 = () => issuePresenceCapability(baseParams(), SUBJECT.privHex)
+
+  it('rejects sig: undefined (the exact TypeError-triggering shape from the audit probe)', () => {
+    const cap: PresenceCapability = { ...cap0(), sig: undefined as unknown as string }
+    expect(() => testWithCapability(f(), cap, EPOCH)).toThrow('capability: sig must be a string')
+  })
+
+  it('rejects a non-string subjectPubHex', () => {
+    const cap: PresenceCapability = { ...cap0(), subjectPubHex: 12345 as unknown as string }
+    expect(() => testWithCapability(f(), cap, EPOCH)).toThrow(
+      'capability: subjectPubHex must be a string',
+    )
+  })
+
+  it('rejects a non-string memberValue', () => {
+    const cap: PresenceCapability = { ...cap0(), memberValue: undefined as unknown as string }
+    expect(() => testWithCapability(f(), cap, EPOCH)).toThrow(
+      'capability: memberValue must be a string',
+    )
   })
 })
 

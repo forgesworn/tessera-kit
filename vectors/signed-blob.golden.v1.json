@@ -1,0 +1,22 @@
+{
+  "kind": "signed-blob",
+  "description": "KFLT v1 frozen vector: a fully SIGNED KFLT blob that must verify against pinnedPubkeyHex via verifyFilterBlob / verifyAndParseFilter, for @forgesworn/tessera-kit. Contradicts the (incorrect) prior claim that \"signatures cannot be frozen\": BIP340 aux randomness only affects producing a NEW signature, not re-verifying an already-frozen one — verify() is fully deterministic. digestHexIndependent is hand-checked via node:crypto, re-implementing computeDigest (sign.ts) with no @noble/hashes involvement, and must match the digest actually signed. Signed by a labelled deterministic demo key (NOT a real secret).",
+  "pinnedPubkeyHex": "2f1b8c97bc873e7657d98caee8d3deeb6b5f90d4f83ba8088b7ff4db2cb137f4",
+  "signerPrivHexDemoOnly": "b44b558e90d426782e16bfd1b93a6a47bc4158bee85cae6c36c80eadfbfe264f",
+  "epoch": 1800000000,
+  "blobHex": "4b464c540101100000d2496b000000006c6b66660800000001000000080000002f1b8c97bc873e7657d98caee8d3deeb6b5f90d4f83ba8088b7ff4db2cb137f495b5758e6da9d08535133b3379865fd891255495febcbab6a842d07655ac8b8b91192b9bed1db173eca751a9a46d2c08b644e3971fb4517c40b52b8f8ea5d31c00000000000000000000000000000000000000000000000000000000909d000021a600000000a21800009752d8a3cc9e",
+  "digestHexIndependent": "c840af560921a86780688d233a408f65cbdf2108fbfbec48019c16bcf4247248",
+  "membership": {
+    "present": [
+      "cc141711d65ee0532bb3cd38e11cba2c20274dbcd348216f0e2c717262814bf8",
+      "3b26b30dbc8696fecb9b3fb0c10b055b887168fb9efa5d8b7069595e2a04aae9",
+      "654dcd61580a0f6e1f7ff732e5718ea07576f8f7afc8935e6b12e37a2260eb1e",
+      "d107e7623e72b66c12289af57ead443f6f9a3b91672ddabf564deb66a81a113e",
+      "051be3b50350d65cb54f3551118f5ed99e066bc85dabb3dbd517c61fe3323fe4",
+      "1c24a2eda21f47877857351d96a8ab2810d31eb098527c1c2114d21bcffb429f"
+    ],
+    "absent": [
+      "e98cb527995abe113cec6ee4c0b45436d0888cc637f3f3330c68871250230087"
+    ]
+  }
+}

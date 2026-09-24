@@ -1,0 +1,40 @@
+{
+  "kind": "keyed-member-key",
+  "description": "KFLT v1 frozen vector for memberKey(pubkeyHex, saltHex) (PROTOCOL.md §1), for @forgesworn/tessera-kit. keyedCases: memberValueHex = sha256(bytes(saltHex) || bytes(pubkeyHex)), saltHex non-empty. openCase: memberKey(pubkeyHex) with salt omitted MUST equal pubkeyHex verbatim. rejectCases: memberKey MUST throw for each (follow-up audit fix: an EMPTY salt makes sha256('' || pk), computable by anyone holding the bare pubkey, so it is rejected outright, not accepted as a distinct-but-weaker keyed value). Independently hand-checked via node:crypto at generation time.",
+  "keyedCases": [
+    {
+      "pubkeyHex": "cf7605ed1bc735f6c825554154627467e1cac9df54cee8699218ed434603c568",
+      "saltHex": "deadbeefcafe",
+      "memberValueHex": "7139fd11e9a178ed9160f85632426aa5e4e6465fa549991ab0342b7a216f5c69"
+    },
+    {
+      "pubkeyHex": "f31b2b6ef48dff580eca633d0a0cfb15adb7c3bdbc2a1d966a1e10eaaefad3c4",
+      "saltHex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "memberValueHex": "bea9510e87076d6ea0d6961fec29fb9f70b071b117e13c48b5566b87a13c7d16"
+    }
+  ],
+  "openCase": {
+    "pubkeyHex": "23d9116b64d5b5a1b35726368ce785f22d22c5aa2a7dc219acbf11f13be161f4",
+    "memberValueHex": "23d9116b64d5b5a1b35726368ce785f22d22c5aa2a7dc219acbf11f13be161f4"
+  },
+  "rejectCases": [
+    {
+      "description": "empty salt (memberKey(pk, '') gives no protection — anyone can compute sha256('' || pk))",
+      "pubkeyHex": "65d27a48dfef406db8f5f437423bfa5f9c83d77bfc12f8a14b8ce3ede5892fb5",
+      "saltHex": "",
+      "expectedErrorSubstring": "salt must be non-empty even-length hex"
+    },
+    {
+      "description": "non-hex salt",
+      "pubkeyHex": "65d27a48dfef406db8f5f437423bfa5f9c83d77bfc12f8a14b8ce3ede5892fb5",
+      "saltHex": "zz",
+      "expectedErrorSubstring": "salt must be non-empty even-length hex"
+    },
+    {
+      "description": "odd-length salt",
+      "pubkeyHex": "65d27a48dfef406db8f5f437423bfa5f9c83d77bfc12f8a14b8ce3ede5892fb5",
+      "saltHex": "abc",
+      "expectedErrorSubstring": "salt must be non-empty even-length hex"
+    }
+  ]
+}

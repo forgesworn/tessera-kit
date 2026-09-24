@@ -9,9 +9,11 @@
 
 tessera-kit is a TypeScript library for non-enumerable membership-presence
 filters, built on a clean-room Binary Fuse 16 port with a custom signed byte
-format (`KFLT`). ESM-only, Node ≥ 22. Two deps: `@noble/curves`, `@noble/hashes`.
-It is the membership-presence brick of the Forgesworn / Signet ecosystem and is
-consumed by `kenspeckle` (relationships + discovery).
+format (`KFLT`). ESM-only, Node ≥ 22. Three deps: `@noble/curves`,
+`@noble/hashes`, `@scure/base` (the last one pulled in only by the optional
+`./nostr` subpath, for base64 — the core `.` and `./capability` entries stay
+`@noble`-only). It is the membership-presence brick of the Forgesworn / Signet
+ecosystem and is consumed by `kenspeckle` (relationships + discovery).
 
 ## Getting Started
 
@@ -74,6 +76,12 @@ const present = testMembership(filter, memberKey(friendPubkey))
 - `issuePresenceCapability(p, subjectPrivHex)` — `p.salt?` (optional keyed-pool salt, omit for open) is used only to derive `memberValue`; never stored on the token
 - `testWithCapability(filter, cap, now?)` — a BEARER check (reusable until `expiresAt`, not one-time)
 - type `PresenceCapability` = `{ serverId, subjectPubHex, memberValue, expiresAt, sig }` (`serverId` must be colon-free and is not bound to any filter)
+
+`./nostr` (optional; the ONLY subpath pulling in `@scure/base`, for base64 — `.` and `./capability` stay `@noble`-only):
+- `buildFilterPublication({ kind, tags, blob, createdAt })` — base64-encodes `blob` into `content`, assembles `{ kind, tags, content, created_at }`; relationship-agnostic (caller supplies `kind`/`tags` — tessera-kit does not know kindred/kenspeckle's addressing convention)
+- `decodeFilterPublicationContent(content, maxBytes?)` — inverse; length-capped (defaults/clamps to `KFLT_MAX_BLOB_BYTES`) BEFORE decoding
+- type `EventTemplate` = `{ kind, tags, content, created_at }` (structural Nostr event shape, no `nostr-tools` dep)
+- lets a server that only needs to *publish* a filter depend on tessera-kit alone, with no `kindred`/`kenspeckle` import required
 
 ## Security
 

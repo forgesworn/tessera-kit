@@ -150,11 +150,13 @@ wrapper, not a cryptographic limit on how long a disclosed `memberValue` stays
 testable.
 
 Omitting `salt` at issue is an **open-pool** capability: `memberValue` is the
-**bare open-pool form** `memberKey(subjectPubHex)` (the pubkey itself), **not**
-`memberKey(subjectPubHex, '')` (which is `sha256('' ‖ pk)` — the keyed value for
-an *empty-string* salt, and never a member of an open pool). Passing `salt: ''`
-explicitly is different again: it is a valid even-length-hex keyed salt and
-routes through the keyed branch, producing `sha256('' ‖ pk)`.
+**bare open-pool form** `memberKey(subjectPubHex)` (the pubkey itself). Passing
+`salt: ''` explicitly is **rejected** (follow-up audit fix): `sha256('' ‖ pk)`
+is computable by anyone who holds the bare pubkey, so an empty salt gives no
+protection at all and is no longer accepted as a "keyed" value —
+`memberKey(pk, '')` throws, and so does `issuePresenceCapability({ salt: ''
+})`. To build (or issue a capability for) an open pool, omit `salt` entirely;
+never pass `''` in its place.
 
 ### 7. Keyed mode trades third-party probing for server-side pull-auth logging
 
@@ -200,8 +202,11 @@ responsibly:
 
 ## Scope
 
-tessera-kit is a pure-computation library with two runtime dependencies
-(`@noble/curves`, `@noble/hashes`) and no network or filesystem access. In scope:
+tessera-kit is a pure-computation library with three runtime dependencies
+(`@noble/curves`, `@noble/hashes`, and `@scure/base` — the latter pulled in
+only by the optional `./nostr` subpath, for base64; the core `.` and
+`./capability` entries stay `@noble`-only) and no network or filesystem
+access. In scope:
 
 - **Input-validation bypass / unbounded allocation** in `parseFilter` — a
   malformed `KFLT` blob that reads past its bounds or triggers an allocation

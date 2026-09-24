@@ -1,0 +1,14 @@
+{
+  "kind": "decoy-seed",
+  "description": "KFLT v1 frozen vector for per-epoch decoy-seed derivation (PROTOCOL.md §2.8: deriveEpochDecoySeedHex) and deriveDecoys (padding.ts), for @forgesworn/tessera-kit. effectiveSeedHex = sha256(utf8(\"tessera-decoy:v1:\") || bytes(decoySeedHex) || u64be(epoch)); decoysHex = deriveDecoys(effectiveSeedHex, decoyCount) = [sha256(bytes(effectiveSeedHex) || LE32(i)) for i in 0..decoyCount). Independently hand-checked via node:crypto at generation time (see scratchpad/gen-vectors.mjs) — not purely self-referential against this package's own @noble/hashes dependency.",
+  "decoySeedHex": "aa11bb22cc33dd44ee55ff66aa77bb8800000000000000000000000000000000",
+  "epoch": 1700000100,
+  "effectiveSeedHex": "dfa812e5128c7d4564e1e4b3fd65943d242e223dbe0fa6d59dbb8b0bdd1ef2a1",
+  "decoyCount": 4,
+  "decoysHex": [
+    "f710968222348cf5237a14e4b293b7ac3ebca7a1acb41eb92a4a208f4571f149",
+    "8174ed0660b5ac3ef75c5fa3ae54c8d7ff24ec080e5e041332c52554b7deef56",
+    "2300b18fe2baac24c3bbb54c8c8cdb1934a3356e57575c34330a918ce731c7f0",
+    "7f11ee6a1275a44320fd5cd24db3306cdc11689f95952f0d4cb5764d28cf0648"
+  ]
+}

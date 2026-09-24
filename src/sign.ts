@@ -32,6 +32,7 @@ import { bytesToHex, hexToBytes, concatBytes } from '@noble/hashes/utils.js'
 // Reuse the ONE definition of the byte layout from the codec — never re-hardcode
 // 32 / 64 / 128 here.
 import { OFF_SIGNER_PUBKEY, OFF_SIGNATURE, OFF_FINGERPRINTS, parseFilter } from './codec.js'
+import { KFLT_MAX_BLOB_BYTES } from './types.js'
 import type { MembershipFilter } from './types.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -107,20 +108,37 @@ export function signFilterBlob(
  *   const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
  *   if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
  *
- * Never throws on malformed/hostile input: a too-short blob returns
+ * Never throws on malformed/hostile input: a too-short OR too-long blob returns
  * `{ signerPubkeyHex: '', ok: false }`, and any sig/pubkey that the verifier
  * rejects (or that fails noble's argument validation) yields `ok: false`.
  *
+ * L1 AUDIT FIX — the size cap is checked BEFORE any hashing. `computeDigest`
+ * SHA-256s the entire `blob[128..end)` fingerprint region; on a raw-HTTPS (not
+ * `parseFilter`-gated) path, an untrusted blob could previously reach that hash
+ * BEFORE any size check ran (`parseFilter`'s `KFLT_MAX_BLOB_BYTES` check only
+ * fires later, in `verifyAndParseFilter`, and only after this function already
+ * did the hashing/verify work) — a ~200 MB hostile blob cost real CPU (measured
+ * ~870 ms of hashing) before ever being rejected. `verifyFilterBlob` now rejects
+ * `blob.length > KFLT_MAX_BLOB_BYTES` up front, alongside the existing too-short
+ * check, so a hostile oversized blob is turned away before any hashing happens
+ * — this protects every caller of `verifyFilterBlob`, including
+ * `verifyAndParseFilter` below (which calls it first).
+ *
  * @param blob the raw (signed) KFLT blob.
- * @returns the embedded signer pubkey (hex; `''` if the blob is too short) and
- *          whether the signature is internally valid under that pubkey (`ok`).
+ * @returns the embedded signer pubkey (hex; `''` if the blob is too short or
+ *          too long) and whether the signature is internally valid under that
+ *          pubkey (`ok`).
  */
 export function verifyFilterBlob(blob: Uint8Array): {
   signerPubkeyHex: string
   ok: boolean
 } {
   // A malformed too-short blob must not crash — report invalid with no signer.
-  if (blob.length < OFF_FINGERPRINTS) {
+  // A too-LONG blob is rejected here too, and BEFORE any hashing (L1 audit
+  // fix) — `computeDigest` below would otherwise SHA-256 the whole fingerprint
+  // region of an attacker-supplied blob of unbounded size before any cap ever
+  // applied.
+  if (blob.length < OFF_FINGERPRINTS || blob.length > KFLT_MAX_BLOB_BYTES) {
     return { signerPubkeyHex: '', ok: false }
   }
 
@@ -152,6 +170,13 @@ export function verifyFilterBlob(blob: Uint8Array): {
  * so an OLDER, validly-signed blob could be replayed (a rollback). This helper
  * makes the safe path the only path: it throws unless the blob is both
  * pin-verified AND (optionally) no older than `minEpoch`.
+ *
+ * L1 AUDIT FIX — this function calls `verifyFilterBlob` FIRST, which now
+ * rejects an oversized blob (`length > KFLT_MAX_BLOB_BYTES`) before any
+ * hashing (see `verifyFilterBlob`'s doc comment) — so an untrusted, huge blob
+ * handed to this function is turned away cheaply, rather than paying for a
+ * full SHA-256 over the fingerprint region before `parseFilter`'s own size
+ * check (which only runs afterwards) would have caught it.
  *
  * IMPORTANT — use the blob's SIGNED `epoch` (this function's freshness check),
  * NOT a Nostr `["epoch"]` *tag* on any wrapping event. A tag is signed only by

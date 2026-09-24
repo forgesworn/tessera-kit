@@ -76,10 +76,29 @@ export function nextPowerOfTwoBand(n: number): number {
  * more decoys next epoch reuses the same leading decoys (stability across bucket
  * growth within a fixed seed).
  *
- * @param decoySeedHex  Even-length hex seed (a per-context secret the caller holds).
+ * `decoySeedHex` MUST be non-empty, even-length hex (audit fix, L4): an empty
+ * seed previously produced PUBLIC, PREDICTABLE decoys (`hexToBytes('')` is a
+ * silently-valid zero-length seed), and an odd-length/non-hex seed leaked a raw
+ * `RangeError` from `@noble/hashes` rather than a kit-shaped error. This
+ * function is a public export (`.` barrel and `./padding` internal), reachable
+ * directly by a caller who bypasses `buildMembershipFilter` — so it validates
+ * on its own rather than relying on `filter.ts`'s `assertDecoySeedHex` (which
+ * additionally enforces a >=16-byte minimum for the build path specifically;
+ * that stronger minimum is NOT re-imposed here, since `deriveDecoys` itself has
+ * no such requirement — only "not empty, well-formed hex").
+ *
+ * @param decoySeedHex  Even-length, non-empty hex seed (a per-context secret the caller holds).
  * @param count         Number of decoys to derive (≥ 0).
  */
 export function deriveDecoys(decoySeedHex: string, count: number): string[] {
+  if (
+    typeof decoySeedHex !== 'string' ||
+    decoySeedHex.length === 0 ||
+    !/^[0-9a-f]*$/i.test(decoySeedHex) ||
+    decoySeedHex.length % 2 !== 0
+  ) {
+    throw new Error('deriveDecoys: decoySeedHex must be non-empty, even-length hex')
+  }
   if (count <= 0) return []
   const seedBytes = hexToBytes(decoySeedHex.toLowerCase())
   const out: string[] = new Array(count)

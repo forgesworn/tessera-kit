@@ -59,6 +59,33 @@ describe('deriveDecoys', () => {
     expect(three).toEqual(five.slice(0, 3))
   })
 
+  it('rejects an empty seed (audit fix, L4 — previously produced public, predictable decoys)', () => {
+    expect(() => deriveDecoys('', 3)).toThrow(
+      'deriveDecoys: decoySeedHex must be non-empty, even-length hex',
+    )
+  })
+
+  it('rejects an empty seed even when count <= 0 (follow-up audit fix — previously the count<=0 short circuit returned [] before the seed was ever validated)', () => {
+    expect(() => deriveDecoys('', 0)).toThrow(
+      'deriveDecoys: decoySeedHex must be non-empty, even-length hex',
+    )
+    expect(() => deriveDecoys('', -1)).toThrow(
+      'deriveDecoys: decoySeedHex must be non-empty, even-length hex',
+    )
+  })
+
+  it('rejects a non-hex seed with a kit-shaped error (audit fix, L4)', () => {
+    expect(() => deriveDecoys('zz', 3)).toThrow(
+      'deriveDecoys: decoySeedHex must be non-empty, even-length hex',
+    )
+  })
+
+  it('rejects an odd-length seed with a kit-shaped error, not a raw @noble RangeError (audit fix, L4)', () => {
+    expect(() => deriveDecoys('abc', 3)).toThrow(
+      'deriveDecoys: decoySeedHex must be non-empty, even-length hex',
+    )
+  })
+
   it('matches the documented construction sha256(seedBytes || LE32(i))', () => {
     // Hand-compute decoy_0 and decoy_1 to pin the byte construction.
     const seedBytes = Uint8Array.from(

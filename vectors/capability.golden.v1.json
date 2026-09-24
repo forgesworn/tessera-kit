@@ -1,0 +1,24 @@
+{
+  "kind": "capability",
+  "description": "KFLT v1 frozen vector for the presence-capability canonical bytes (PROTOCOL.md §5.2), for @forgesworn/tessera-kit. preimageHex/digestHex are independently hand-checked via node:crypto at generation time (see scratchpad/gen-vectors.mjs). sig is a FIXED, already-valid BIP340 signature (frozen once — BIP340 uses random aux by default, so it is not re-derived; only re-VERIFIED, which is fully deterministic) produced by the demo subjectPrivHex below (a labelled deterministic demo key, sha256(\"tessera-kit vector demo key: capability vector subject (DEMO KEY — not a secret)\") — NOT a real secret). This is an OPEN-pool capability (memberValue === subjectPubHex).",
+  "serverId": "vector.example.test",
+  "subjectPubHex": "0b1beb714e3f732b3aa59c2ae7ad4bb37360d3984cc6c3408bc44a7d62ea129f",
+  "subjectPrivHexDemoOnly": "250e8cb552b4bb2eb7e5ba4d72f0c873d9b3ef0e22be52ed5a1d25f95eeba394",
+  "memberValue": "0b1beb714e3f732b3aa59c2ae7ad4bb37360d3984cc6c3408bc44a7d62ea129f",
+  "expiresAt": 2000000000,
+  "preimageHex": "746573736572612d6361703a76323a766563746f722e6578616d706c652e746573743a306231626562373134653366373332623361613539633261653761643462623337333630643339383463633663333430386263343461376436326561313239663a306231626562373134653366373332623361613539633261653761643462623337333630643339383463633663333430386263343461376436326561313239663a32303030303030303030",
+  "digestHex": "7eb84537f4ea51eb46ad7a1b3a96a778c57b83cc8399853a178f2e93f37219e5",
+  "sig": "60f42f1fcdce31ea4ce749649c613bdcada4e0d64a052bc43996b50bd0cf905e919fcd7a093b840032d38e11874fd2d772adf952033c9677936f0f6c7acafa7c",
+  "filterMemberKeysHex": [
+    "f37300e5bae2c3e6aad25a8037a3f9b9012d06082349ee3cebee313c0fff7e4b",
+    "a00beb0e3914f9d24205b0458397324de1c8d48557c3429a7cb218841c767049",
+    "2cb6cceda2e76a615a760720ee1b8d208503b8440181922be7ae3ad80a4a69d1",
+    "990f045a26220f99c0eb341adfe3e4cf73a9f2f88d733bd73a867f77769b6010",
+    "177f9ba5f63ca100cf551d0a4d23efa08ab5f527eb00bf1b2c93b381e7f3b010",
+    "0b1beb714e3f732b3aa59c2ae7ad4bb37360d3984cc6c3408bc44a7d62ea129f"
+  ],
+  "filterOpts": {
+    "epoch": 1999999000,
+    "fingerprintBits": 16
+  }
+}

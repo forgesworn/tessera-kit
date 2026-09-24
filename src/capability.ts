@@ -52,6 +52,22 @@
 // capability says "this subject consents"; it says nothing about whether the
 // filter is genuine.
 //
+// M2 AUDIT FIX — memberValue vs subjectPubHex binding (OPEN pools only, INHERENT
+// LIMIT on keyed ones): the subject's signature proves "this subject signed this
+// {serverId, subjectPubHex, memberValue, expiresAt} tuple" — it does NOT by
+// itself prove memberValue is derived FROM subjectPubHex. A signer can name
+// their own subjectPubHex while setting memberValue to someone else's pool
+// value (e.g. Alice signs {subjectPubHex: alice, memberValue: bob}) and the
+// signature still verifies. On an OPEN pool memberValue MUST equal
+// subjectPubHex by construction (§5.1), so `testWithCapability` now checks that
+// directly and rejects a mismatch. On a KEYED pool memberValue =
+// memberKey(subjectPubHex, salt) and the bearer never holds the salt (the whole
+// point of a keyed pool) — there is NO way for `testWithCapability` to
+// recompute and verify that binding from the bearer's side. This is an
+// INHERENT LIMIT of the keyed-pool design, not a gap this module can close: on
+// a keyed pool, the subject's signature is the ONLY assertion that memberValue
+// is theirs, and a consumer must trust it as such (PROTOCOL.md §7.4 / §5.4b).
+//
 // ───────────────────────────────────────────────────────────────────────────
 // CANONICAL SIGNING BYTES (document verbatim in PROTOCOL.md / consume in TK-8):
 //
@@ -154,7 +170,16 @@ function canonicalDigest(
   return sha256(preimage)
 }
 
-/** Throw if `serverId` is empty or contains a colon (delimiter-injection guard). */
+/** Matches a lone (unpaired) UTF-16 surrogate: a high surrogate not followed by
+ *  a low surrogate, or a low surrogate not preceded by a high surrogate. Used
+ *  by `assertServerId` (L3 audit fix) instead of `String.prototype.isWellFormed`
+ *  — that method is Node >=20/ES2024-only and this kit's `engines` field does
+ *  not (yet) make that guarantee load-bearing for every consumer's runtime, so
+ *  a regex check is used instead of depending on it. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+/** Throw if `serverId` is empty, contains a colon (delimiter-injection guard),
+ *  or is not well-formed UTF-16 (L3 audit fix — see below). */
 function assertServerId(serverId: string): void {
   if (typeof serverId !== 'string' || serverId.length === 0) {
     throw new Error('capability: serverId must be a non-empty string')
@@ -162,6 +187,21 @@ function assertServerId(serverId: string): void {
   if (serverId.includes(':')) {
     throw new Error(
       'capability: serverId must not contain a colon (delimiter-injection guard)',
+    )
+  }
+  // L3 AUDIT FIX — reject a lone (unpaired) UTF-16 surrogate. `utf8ToBytes`
+  // (TextEncoder under the hood) silently replaces an unpaired surrogate with
+  // U+FFFD (the replacement character) rather than throwing, which means TWO
+  // DIFFERENT strings — e.g. "a\uD800" (a lone high surrogate) and "a�"
+  // (the literal replacement character) — encode to IDENTICAL UTF-8 bytes and
+  // so produce the IDENTICAL canonical preimage/digest/signature. A capability
+  // issued for one string verifies when presented as the other (confirmed:
+  // `probe.mjs` in the audit scratchpad). Rejecting any serverId containing a
+  // lone surrogate closes that collision at the input boundary, on both issue
+  // and test (this function is shared by both).
+  if (LONE_SURROGATE.test(serverId)) {
+    throw new Error(
+      'capability: serverId must not contain an unpaired UTF-16 surrogate (not well-formed text)',
     )
   }
 }
@@ -191,10 +231,20 @@ export function issuePresenceCapability(
   p: { serverId: string; subjectPubHex: string; salt?: string; expiresAt: number },
   subjectPrivHex: string,
 ): PresenceCapability {
-  // 1. Validate every field up front.
+  // 1. Validate every field up front. `typeof` checks come FIRST on every
+  //    string field (audit fix, L4) — calling `.toLowerCase()` on a non-string
+  //    (e.g. `subjectPrivHex: undefined`, or a caller who passes a number by
+  //    mistake) previously threw a raw @noble-unrelated `TypeError` straight
+  //    out of THIS module, before any of the kit-shaped checks below ever ran.
+  if (typeof subjectPrivHex !== 'string') {
+    throw new Error('capability: subjectPrivHex must be a string')
+  }
   const priv = subjectPrivHex.toLowerCase()
   if (!HEX64.test(priv)) {
     throw new Error('capability: subjectPrivHex must be 64 hex chars')
+  }
+  if (typeof p.subjectPubHex !== 'string') {
+    throw new Error('capability: subjectPubHex must be a string')
   }
   const subjectPubHex = p.subjectPubHex.toLowerCase()
   if (!HEX64.test(subjectPubHex)) {
@@ -202,9 +252,14 @@ export function issuePresenceCapability(
   }
   assertServerId(p.serverId)
   assertExpiresAt(p.expiresAt, 'capability')
-  // `memberKey` itself validates `salt` (even-length hex) when it is defined —
-  // no need to duplicate that check here. `salt === undefined` ⇒ open pool ⇒
-  // `memberKey` returns `subjectPubHex` verbatim.
+  if (p.salt !== undefined && typeof p.salt !== 'string') {
+    throw new Error('capability: salt must be a string')
+  }
+  // `memberKey` itself validates `salt`'s HEX SHAPE (even-length hex) when it
+  // is defined — no need to duplicate that check here, only the `typeof` gate
+  // above (memberKey's own validation assumes a string and would otherwise
+  // throw its own raw TypeError on a non-string `salt`). `salt === undefined`
+  // ⇒ open pool ⇒ `memberKey` returns `subjectPubHex` verbatim.
   const memberValue = memberKey(subjectPubHex, p.salt)
 
   const privBytes = hexToBytes(priv)
@@ -252,13 +307,36 @@ export function issuePresenceCapability(
  *      `now > expiresAt` → throw 'capability expired'.
  *   3. Recompute the digest and `schnorr.verify` against `subjectPubHex`.
  *      Invalid (or noble-rejected) → throw 'capability signature invalid'.
- *   4. ONLY THEN test `cap.memberValue` directly against the filter — the bearer
+ *   4. For an OPEN pool (`!f.keyed`) ONLY, require `memberValue === subjectPubHex`
+ *      (case-insensitive) — see the M2 audit-fix note below.
+ *   5. ONLY THEN test `cap.memberValue` directly against the filter — the bearer
  *      never re-derives anything from a salt; the capability already carries the
  *      exact value to test.
  *
  * An expired or invalid capability is a USAGE error — we THROW rather than
  * silently returning false, so a caller can't confuse "not present" with "this
  * token is no good." A genuine present/absent answer is the only `boolean` result.
+ *
+ * M2 AUDIT FIX — memberValue is bound to subjectPubHex on an OPEN pool, but
+ * CANNOT be on a keyed one (inherent limit, not a bug left unfixed): the
+ * subject's Schnorr signature over `{serverId, subjectPubHex, memberValue,
+ * expiresAt}` proves the SUBJECT consented to THAT tuple, but says nothing
+ * about whether `memberValue` is actually derived from `subjectPubHex` — a
+ * signer can sign a tuple naming their OWN `subjectPubHex` while setting
+ * `memberValue` to anyone else's pool value (e.g. Alice signs
+ * `{subjectPubHex: alice, memberValue: bob}`), and the signature still
+ * verifies, because it only proves "alice signed this tuple," not "this
+ * tuple's memberValue belongs to alice." On an OPEN pool `memberValue` IS
+ * `subjectPubHex` by construction (§5.1 / PROTOCOL.md), so this function can
+ * (and now does) check the binding itself and reject a mismatch outright — a
+ * hit can no longer be silently credited to the wrong person. On a KEYED pool
+ * `memberValue = memberKey(subjectPubHex, salt)` and the bearer never has the
+ * salt (that's the whole point of a keyed pool — see the module note), so
+ * NOTHING in this function's possession can recompute or check that binding;
+ * the subject's signature is the ONLY assertion available that `memberValue`
+ * is theirs, and it must be trusted as such. This is documented as an
+ * inherent limit of the keyed-pool design, not something a future patch can
+ * close from the bearer's side (PROTOCOL.md §7.4 / §5.4b).
  *
  * REMEMBER (see the module note): this check does not — and cannot — enforce
  * single use. A capability that passes here is a valid BEARER credential; it
@@ -280,10 +358,19 @@ export function testWithCapability(
 ): boolean {
   // 1. Validate field shapes (mirrors issue; rejects colon serverId on the test
   //    side too — the delimiter guard must hold wherever the canonical string is
-  //    recomputed).
+  //    recomputed). `typeof` checks come FIRST on every string field (audit
+  //    fix, L4) — `.toLowerCase()` on a non-string (e.g. a hand-built `cap`
+  //    with `sig: undefined`) previously threw a raw `TypeError` instead of a
+  //    kit-shaped capability error.
+  if (typeof cap.subjectPubHex !== 'string') {
+    throw new Error('capability: subjectPubHex must be a string')
+  }
   const subjectPubHex = cap.subjectPubHex.toLowerCase()
   if (!HEX64.test(subjectPubHex)) {
     throw new Error('capability: subjectPubHex must be 64 hex chars')
+  }
+  if (typeof cap.memberValue !== 'string') {
+    throw new Error('capability: memberValue must be a string')
   }
   const memberValue = cap.memberValue.toLowerCase()
   if (!HEX64.test(memberValue)) {
@@ -291,6 +378,9 @@ export function testWithCapability(
   }
   assertServerId(cap.serverId)
   assertExpiresAt(cap.expiresAt, 'capability')
+  if (typeof cap.sig !== 'string') {
+    throw new Error('capability: sig must be a string')
+  }
   const sig = cap.sig.toLowerCase()
   if (!SIG_HEX.test(sig)) {
     throw new Error('capability: sig must be 128 hex chars (64-byte Schnorr sig)')
@@ -322,9 +412,23 @@ export function testWithCapability(
     throw new Error('capability signature invalid')
   }
 
-  // 4. ONLY after sig + expiry pass: test the carried memberValue directly. There
-  //    is no salt to re-derive anything from — the capability already IS the
-  //    value to test (audit fix; see the module note on why the salt itself is
-  //    never carried).
+  // 4. M2 audit fix — bind memberValue to subjectPubHex on an OPEN pool. On an
+  //    open pool memberValue MUST be subjectPubHex itself (§5.1); nothing else
+  //    is a legitimate open-pool memberValue, so reject a mismatch here rather
+  //    than letting a validly-signed-but-mismatched capability credit a hit to
+  //    the wrong person (e.g. Alice signs {subjectPubHex: alice, memberValue:
+  //    bob} — the sig checks out, but bob is who actually gets tested). A
+  //    KEYED pool CANNOT be checked this way — the bearer has no salt, so it
+  //    has no way to recompute memberKey(subjectPubHex, salt) and compare; the
+  //    subject's signature is the only assertion available that memberValue is
+  //    theirs (see the doc comment above and the module note).
+  if (!f.keyed && memberValue !== subjectPubHex) {
+    throw new Error('capability: memberValue does not match subjectPubHex (open pool)')
+  }
+
+  // 5. ONLY after sig + expiry + (open-pool) binding pass: test the carried
+  //    memberValue directly. There is no salt to re-derive anything from — the
+  //    capability already IS the value to test (audit fix; see the module note
+  //    on why the salt itself is never carried).
   return testMembership(f, memberValue)
 }

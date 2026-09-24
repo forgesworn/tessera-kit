@@ -32,7 +32,9 @@ carries 16-bit *fingerprints*, not keys.
 npm i @forgesworn/tessera-kit
 ```
 
-ESM-only, Node ≥ 22. Two runtime deps: `@noble/curves`, `@noble/hashes`.
+ESM-only, Node ≥ 22. Three runtime deps: `@noble/curves`, `@noble/hashes`, and
+`@scure/base` (pulled in only by the optional `./nostr` subpath, for base64 —
+the core `.` and `./capability` entries stay `@noble`-only).
 
 ## Quick start
 
@@ -164,6 +166,35 @@ Types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`
 | `issuePresenceCapability(p, subjectPrivHex)` | Subject mints a **bearer** consent token to be located. `p.salt` (optional; a keyed pool's salt, omit for open) is used only to derive `memberValue` and is never stored on the returned token. Asserts the embedded `subjectPubHex` matches the signing key. |
 | `testWithCapability(filter, cap, now?)` | Verify the token (expiry + sig first, in that order) then test `cap.memberValue` directly. Throws on expired/forged/malformed. |
 | Type: `PresenceCapability` | `{ serverId, subjectPubHex, memberValue, expiresAt, sig }`. `serverId` **must be colon-free** and is not cryptographically bound to any filter. `memberValue` is the subject's own 64-hex pool value — never the pool salt. |
+
+### `./nostr`
+
+Optional, relationship-agnostic Nostr publication helpers (spec §6). This is
+the **only** subpath that pulls in `@scure/base` (for base64) — the core `.`
+and `./capability` entries stay `@noble`-only. A server that only needs to
+*publish* a filter can depend on tessera-kit alone via this subpath — no
+`kindred`/`kenspeckle` import required.
+
+```typescript
+import { buildFilterPublication, decodeFilterPublicationContent } from '@forgesworn/tessera-kit/nostr'
+
+// Server: assemble the unsigned Nostr event template around a signed KFLT blob.
+// tessera-kit does NOT know kindred's addressing convention — YOU supply kind/tags.
+const event = buildFilterPublication({ kind: 30444, tags: [['d', 'my:d:tag']], blob, createdAt })
+// event.content is base64(blob); sign `event` with your own Nostr key (NIP-01) — separate
+// from the in-blob Schnorr provenance signature (signFilterBlob).
+
+// Client: decode an event's content back to the raw blob, capped at KFLT_MAX_BLOB_BYTES
+// (or a smaller caller-supplied cap) BEFORE decoding, so a hostile oversized event can't
+// force a large allocation.
+const blobBytes = decodeFilterPublicationContent(event.content)
+```
+
+| Export | Purpose |
+|--------|---------|
+| `buildFilterPublication({ kind, tags, blob, createdAt })` | Base64-encodes `blob` into `content` and assembles `{ kind, tags, content, created_at }`. Relationship-agnostic — the caller supplies `kind`/`tags`. |
+| `decodeFilterPublicationContent(content, maxBytes?)` | Inverse: decodes `content` back to raw blob bytes. Length-capped (defaults to, and is clamped to, `KFLT_MAX_BLOB_BYTES`) **before** decoding. |
+| Type: `EventTemplate` | `{ kind, tags, content, created_at }` — the unsigned Nostr event shape (structural; no `nostr-tools` runtime dep). |
 
 The exact byte layouts (KFLT header, signing digest, capability canonical bytes,
 and the Nostr publication tag shape) are in **[PROTOCOL.md](./PROTOCOL.md)**.

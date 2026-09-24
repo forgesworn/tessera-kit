@@ -19,7 +19,14 @@ export interface MembershipFilter {
 
 export interface FilterBuildOptions {
   fingerprintBits?: FingerprintBits            // default 16
-  salt?: string                                // hex; presence ⇒ keyed=true
+  salt?: string                                // hex; presence ⇒ keyed=true. When
+                                                // given, MUST be non-empty
+                                                // even-length hex (audit fix, L4) —
+                                                // its bytes are never used, only
+                                                // its presence, but the shape is
+                                                // still validated so `keyed` can't
+                                                // be set by an accidental empty or
+                                                // malformed value (filter.ts).
   padToBucket?: boolean                        // default true
   /** Even-length hex seed, MUST be at least 16 bytes (32 hex chars), for
    *  STABLE-PER-EPOCH decoy padding (spec §7.5). When set, `buildMembershipFilter`

@@ -23,6 +23,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { BinaryFuse16 } from './fuse.js'
 import { nextPowerOfTwoBand, padMembersToBucket } from './padding.js'
+import { isValidSaltHex } from './member-key.js'
 import type { FilterBuildOptions, MembershipFilter } from './types.js'
 
 /** Every member key handed to `buildMembershipFilter` must already be a
@@ -46,6 +47,23 @@ function assertDecoySeedHex(decoySeedHex: string): void {
   }
   if (decoySeedHex.length < 32) {
     throw new Error('tessera-kit: decoySeedHex must be at least 16 bytes (32 hex chars)')
+  }
+}
+
+/** `opts.salt`, when supplied, must be non-empty even-length hex (audit fix,
+ *  L4). `buildMembershipFilter` never uses `salt`'s bytes for anything — it
+ *  only tests `salt !== undefined` to set the on-wire `keyed` flag (module
+ *  note above) — but an unvalidated `salt: ''` or `salt: 'zz'` previously set
+ *  `keyed: true` on a blob whose caller may not have salted anything at all,
+ *  silently mislabeling the pool. This defers to `isValidSaltHex` — the SAME
+ *  predicate `memberKey` (`member-key.ts`) uses for its own `saltHex`
+ *  argument — rather than a second, independently-maintained copy of the same
+ *  regex (follow-up audit fix): "keyed" now always implies the caller passed
+ *  something that could plausibly BE a real salt, by the one rule that
+ *  defines what a salt looks like everywhere in this kit. */
+function assertBuildSalt(salt: string): void {
+  if (typeof salt !== 'string' || !isValidSaltHex(salt)) {
+    throw new Error('tessera-kit: opts.salt must be non-empty even-length hex')
   }
 }
 
@@ -133,6 +151,12 @@ export function buildMembershipFilter(
 
   if (opts.decoySeedHex !== undefined) {
     assertDecoySeedHex(opts.decoySeedHex)
+  }
+
+  // `opts.salt` audit fix (L4) — validated even though buildMembershipFilter
+  // never uses its bytes (see assertBuildSalt's doc comment above).
+  if (opts.salt !== undefined) {
+    assertBuildSalt(opts.salt)
   }
 
   // Validate EVERY key as 64-hex (case-insensitive) BEFORE lowercasing/dedup —

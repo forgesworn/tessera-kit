@@ -1,0 +1,28 @@
+{
+  "description": "KFLT v1 frozen golden vector proving the decoy-seed derivation end-to-end: 3 members, band 4 (padToBucket:true), decoySeedHex fixed → exactly ONE decoy is added, and it MUST be decoysHex[0] from decoy-seed.golden.v1.json (same decoySeedHex + epoch). Rebuild + serialize MUST reproduce serializedBlobHex byte-for-byte, and membership.present includes the real members AND the expected decoy — proving deriveEpochDecoySeedHex + deriveDecoys + padMembersToBucket + build are wired together as documented (PROTOCOL.md §2.8), not just that the formula alone is correct.",
+  "memberKeysHex": [
+    "7d09c5fe352be2e8756fbf9e0d755dfbfc20fc582d667a6e4c26da7750ede510",
+    "df9184ca6b84248ffc29f695099adb9839c8f4072f510cc30ca5e81ae31252e9",
+    "c17c990b5fd22f881c5b0d3168e7ed7addb01ea406c539cd81ade90efbda592a"
+  ],
+  "opts": {
+    "fingerprintBits": 16,
+    "epoch": 1700000100,
+    "decoySeedHex": "aa11bb22cc33dd44ee55ff66aa77bb8800000000000000000000000000000000",
+    "padToBucket": true
+  },
+  "serializedBlobHex": "4b464c540101100264f15365000000006c6b66660800000001000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d3f10000000000007159ba3637290000",
+  "membership": {
+    "present": [
+      "7d09c5fe352be2e8756fbf9e0d755dfbfc20fc582d667a6e4c26da7750ede510",
+      "df9184ca6b84248ffc29f695099adb9839c8f4072f510cc30ca5e81ae31252e9",
+      "c17c990b5fd22f881c5b0d3168e7ed7addb01ea406c539cd81ade90efbda592a",
+      "f710968222348cf5237a14e4b293b7ac3ebca7a1acb41eb92a4a208f4571f149"
+    ],
+    "absent": [
+      "8174ed0660b5ac3ef75c5fa3ae54c8d7ff24ec080e5e041332c52554b7deef56",
+      "2300b18fe2baac24c3bbb54c8c8cdb1934a3356e57575c34330a918ce731c7f0",
+      "0000000000000000000000000000000000000000000000000000000000000000"
+    ]
+  }
+}

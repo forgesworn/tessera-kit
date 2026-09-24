@@ -82,11 +82,21 @@ function isPowerOfTwo(n: number): boolean {
  * Allocates exactly `128 + arrayLength*2` bytes. The signer_pubkey (off 32..64)
  * and sig (off 64..128) regions are left ZERO — TK-5's signing step fills them
  * in place over the same byte layout.
+ *
+ * @throws if the resulting blob would exceed `KFLT_MAX_BLOB_BYTES` (audit fix,
+ *         L4) — checked BEFORE allocating, so an oversized filter (e.g. built
+ *         with default padding over a true count above ~2^24) fails loudly
+ *         here rather than producing a blob that `parseFilter` (and
+ *         `verifyFilterBlob`, TK-5) would reject anyway.
  */
 export function serializeFilter(f: MembershipFilter): Uint8Array {
   const fuse = f._fuse
   const arrayLength = fuse.arrayLength
   const total = KFLT_HEADER_LEN + arrayLength * 2
+
+  if (total > KFLT_MAX_BLOB_BYTES) {
+    throw new Error('serializeFilter: output would exceed KFLT_MAX_BLOB_BYTES')
+  }
 
   const buf = new Uint8Array(total)
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)

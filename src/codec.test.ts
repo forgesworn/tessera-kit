@@ -88,6 +88,46 @@ describe('serializeFilter / parseFilter — round-trip', () => {
   })
 })
 
+// L4 audit fix — serializeFilter must not silently produce a blob larger than
+// KFLT_MAX_BLOB_BYTES (parseFilter/verifyFilterBlob would reject it anyway,
+// further down the pipe — this catches it at the source instead). Actually
+// building a filter with a true member count large enough to trigger this via
+// buildMembershipFilter would need tens of millions of real keys, so this test
+// constructs a MembershipFilter-shaped object whose `_fuse.arrayLength` alone
+// is large enough to push the computed blob size over the cap — serializeFilter
+// only reads `arrayLength`/`fingerprints.length` before its early throw, never
+// the (unused, too-small-to-match) fingerprint contents.
+describe('serializeFilter — output size cap (L4 audit fix)', () => {
+  it('throws before allocating when 128 + arrayLength*2 would exceed KFLT_MAX_BLOB_BYTES', () => {
+    const hugeArrayLength = Math.ceil(KFLT_MAX_BLOB_BYTES / 2) + 1024 // well past the cap
+    const oversized = {
+      fingerprintBits: 16,
+      keyed: false,
+      epoch: EPOCH,
+      type: 1,
+      _fuse: {
+        seed: 0,
+        segmentLength: 4,
+        segmentLengthMask: 3,
+        segmentCount: 1,
+        segmentCountLength: 4,
+        arrayLength: hugeArrayLength,
+        fingerprints: new Uint16Array(0), // never read — the throw fires first
+      },
+      _memberCountBand: 1,
+      _padded: false,
+    } as unknown as MembershipFilter
+    expect(() => serializeFilter(oversized)).toThrow(
+      'serializeFilter: output would exceed KFLT_MAX_BLOB_BYTES',
+    )
+  })
+
+  it('a normal-sized filter well under the cap still serializes fine', () => {
+    const { f } = openFilter(50, 250)
+    expect(() => serializeFilter(f)).not.toThrow()
+  })
+})
+
 describe('parseFilter — hardening (each check throws on a corrupted copy)', () => {
   // A known-good blob to corrupt.
   const good = serializeFilter(openFilter(40).f)

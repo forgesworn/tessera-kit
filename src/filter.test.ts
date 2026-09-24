@@ -172,6 +172,42 @@ describe('buildMembershipFilter — input key validation (B3 audit fix)', () => 
   })
 })
 
+// L4 audit fix — `opts.salt`, when supplied, must be non-empty even-length
+// hex. Before the fix, `salt: ''` or `salt: 'zz'` both silently set the
+// on-wire `keyed` flag despite not being anything that plausibly served as a
+// salt.
+describe('buildMembershipFilter — opts.salt validation (L4 audit fix)', () => {
+  const keys = pubkeys(3, 70).map((pk) => memberKey(pk))
+
+  it('rejects an empty salt', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH, salt: '' })).toThrow(
+      'tessera-kit: opts.salt must be non-empty even-length hex',
+    )
+  })
+
+  it('rejects a non-hex salt', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH, salt: 'zz' })).toThrow(
+      'tessera-kit: opts.salt must be non-empty even-length hex',
+    )
+  })
+
+  it('rejects an odd-length salt', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH, salt: 'abc' })).toThrow(
+      'tessera-kit: opts.salt must be non-empty even-length hex',
+    )
+  })
+
+  it('accepts a well-formed salt and sets keyed:true', () => {
+    const f = buildMembershipFilter(keys, { epoch: EPOCH, salt: 'deadbeef' })
+    expect(f.keyed).toBe(true)
+  })
+
+  it('omitting salt entirely still builds an open pool', () => {
+    const f = buildMembershipFilter(keys, { epoch: EPOCH })
+    expect(f.keyed).toBe(false)
+  })
+})
+
 // B7 (audit fix) — epoch must be a non-negative safe integer at build time (a
 // negative epoch previously wrapped to 2^64-1 on the wire via setBigUint64).
 describe('buildMembershipFilter — epoch validation (B7 audit fix)', () => {

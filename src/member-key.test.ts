@@ -20,4 +20,24 @@ describe('memberKey', () => {
     expect(() => memberKey('xyz')).toThrow()
     expect(() => memberKey('a'.repeat(63))).toThrow()
   })
+
+  // Follow-up audit fix — an EMPTY salt makes the "keyed" value sha256('' ‖ pk),
+  // which anyone can compute from the bare pubkey alone: it provides no
+  // speed-bump at all, so it is refused outright (distinct from OMITTING
+  // `saltHex`, which is the legitimate open-pool form).
+  it('rejects an empty salt', () => {
+    expect(() => memberKey(PK, '')).toThrow('memberKey: salt must be non-empty even-length hex')
+  })
+
+  it('rejects a non-hex salt', () => {
+    expect(() => memberKey(PK, 'zz')).toThrow('memberKey: salt must be non-empty even-length hex')
+  })
+
+  it('rejects an odd-length salt', () => {
+    expect(() => memberKey(PK, 'abc')).toThrow('memberKey: salt must be non-empty even-length hex')
+  })
+
+  it('omitting saltHex entirely (the open-pool form) still works', () => {
+    expect(memberKey(PK)).toBe(PK)
+  })
 })

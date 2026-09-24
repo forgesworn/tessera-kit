@@ -4,8 +4,9 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { buildMembershipFilter, testMembership } from './filter.js'
 import { memberKey } from './member-key.js'
-import { serializeFilter, parseFilter } from './codec.js'
+import { serializeFilter, parseFilter, OFF_FINGERPRINTS } from './codec.js'
 import { signFilterBlob, verifyFilterBlob, verifyAndParseFilter } from './sign.js'
+import { KFLT_MAX_BLOB_BYTES } from './types.js'
 import type { MembershipFilter } from './types.js'
 
 // Deterministic distinct 64-hex pubkeys (same style as codec.test.ts).
@@ -210,6 +211,33 @@ describe('verifyFilterBlob — malformed input does not throw', () => {
     for (let i = 0; i < b.length; i++) b[i] = (i * 73 + 11) & 0xff
     expect(() => verifyFilterBlob(b)).not.toThrow()
     expect(verifyFilterBlob(b).ok).toBe(false)
+  })
+})
+
+// L1 audit fix — an oversized blob is rejected BEFORE any hashing, not just
+// (eventually) by parseFilter. Before the fix, `verifyFilterBlob` SHA-256'd
+// the entire `blob[128..end)` region unconditionally — a raw-HTTPS caller who
+// handed it a huge hostile blob paid for that hash before any size check ran.
+describe('verifyFilterBlob / verifyAndParseFilter — oversized blob rejected before hashing (L1 audit fix)', () => {
+  it('verifyFilterBlob returns ok:false, no throw, for a blob over KFLT_MAX_BLOB_BYTES', () => {
+    const big = new Uint8Array(KFLT_MAX_BLOB_BYTES + 1)
+    // Give it a plausible-looking header (magic + real signer/sig prefix) so
+    // that, if the size check were missing, it would proceed to hash and
+    // verify rather than failing for some unrelated reason.
+    const { blob } = signedBlob(10, 200)
+    big.set(blob.subarray(0, OFF_FINGERPRINTS), 0)
+    const { ok, signerPubkeyHex } = verifyFilterBlob(big)
+    expect(ok).toBe(false)
+    expect(signerPubkeyHex).toBe('')
+  })
+
+  it('verifyAndParseFilter throws for an oversized blob (pin check fails before parseFilter is ever reached)', () => {
+    const big = new Uint8Array(KFLT_MAX_BLOB_BYTES + 1)
+    const { blob } = signedBlob(10, 201)
+    big.set(blob.subarray(0, OFF_FINGERPRINTS), 0)
+    expect(() =>
+      verifyAndParseFilter(big, { pinnedPubkeyHex: SERVER.pubHex }),
+    ).toThrow('signature invalid or signer does not match')
   })
 })
 

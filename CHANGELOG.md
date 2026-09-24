@@ -4,13 +4,15 @@ All notable changes to `@forgesworn/tessera-kit` are documented here. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — Unreleased
 
-A second audit pass over 0.2.0, closing gaps the first pass missed. Three
-items are marked **Breaking** — they change what previously-accepted input now
-throws on, or what result a previously-accepted call now returns.
+A post-audit hardening pass over 0.1.0, followed by a second review pass that
+closed gaps the first missed. Several fixes are **breaking** — 0.1.0 was never
+published, so this is the first shape consumers actually build against.
 
-### Breaking
+### Second review pass
+
+#### Breaking
 
 - **`testWithCapability` now rejects an OPEN-pool capability whose
   `memberValue` does not equal `subjectPubHex` (M2).** Previously, a validly
@@ -49,7 +51,7 @@ throws on, or what result a previously-accepted call now returns.
   never pass `salt: ''` / `saltHex: ''` anywhere in this kit — omit the
   option entirely for an open pool.
 
-### Fixed
+#### Fixed
 
 - **Fuse construction could be permanently blocked by two member keys that
   hash to the same 64-bit value (M1).** `BinaryFuse16.build` de-duplicated
@@ -95,7 +97,7 @@ throws on, or what result a previously-accepted call now returns.
   would exceed `KFLT_MAX_BLOB_BYTES`, checked before allocating, instead of
   producing a blob `parseFilter`/`verifyFilterBlob` would reject anyway.
 
-### Added
+#### Added
 
 - **Five new frozen vector files** under `vectors/` (v1 naming, alongside
   `kflt.golden.v1.json`): `decoy-seed.golden.v1.json` (the per-epoch decoy-seed
@@ -118,7 +120,7 @@ throws on, or what result a previously-accepted call now returns.
   frozen bytes directly and re-checks membership against the PARSED filter,
   not only the rebuilt one.
 
-### Docs
+#### Docs
 
 - Fixed the dependency count: README/llms.txt/SECURITY.md said "two runtime
   deps"; it is three (`@noble/curves`, `@noble/hashes`, `@scure/base` — the
@@ -136,13 +138,9 @@ throws on, or what result a previously-accepted call now returns.
   `serverId` encoding (§5.3), and the L4 input-validation additions
   (`opts.salt`, §1; `deriveDecoys`, §2.8; `serializeFilter`'s size cap, §3).
 
-## [0.2.0] — Unreleased
+### First audit pass
 
-A post-audit hardening pass over 0.1.0. Several fixes are **breaking** —
-0.1.0 was never published, so this is the first shape consumers actually build
-against.
-
-### Breaking
+#### Breaking
 
 - **Capability `saltHint` → `memberValue`.** `PresenceCapability.saltHint` (the
   raw keyed-pool salt, carried in clear) is replaced by `memberValue`: the
@@ -198,7 +196,7 @@ against.
   the size cap entirely); any value above `KFLT_MAX_BLOB_BYTES` is silently
   clamped down to it.
 
-### Added
+#### Added
 
 - **`verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? })`** (`sign.ts`,
   exported from `.`) — the recommended combined path: pin-verifies the signer
@@ -207,13 +205,13 @@ against.
   "forgot to pin" and "no freshness check" gaps left by using
   `verifyFilterBlob` / `parseFilter` separately.
 
-### Fixed
+#### Fixed
 
 - `testWithCapability` now throws if the resolved `now` clock value is not
   `Number.isFinite` — an injected `NaN` previously made `NaN > expiresAt`
   evaluate to `false`, silently skipping the expiry check.
 
-### Security
+#### Security
 
 - **B1 (HIGH): a capability no longer discloses the pool salt.** The old
   `saltHint` field carried the keyed pool's salt in clear, so holding any one

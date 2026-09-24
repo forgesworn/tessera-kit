@@ -1,6 +1,6 @@
 {
   "name": "@forgesworn/tessera-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Privacy-preserving membership-presence filter — build, test, sign, and serialize a non-enumerable Binary Fuse filter so clients answer \"is this person here?\" locally.",
   "type": "module",
   "main": "./dist/index.js",

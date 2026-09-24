@@ -25,7 +25,7 @@ src/
   member-key.ts   — memberKey(): open (pubkey) vs keyed (sha256(salt ‖ pubkey)) values
   fuse.ts         — Binary Fuse 16 filter (clean-room port; filter-only, knows no relationships)
   filter.ts       — buildMembershipFilter / testMembership (public surface)
-  padding.ts      — size-bucket padding + stable decoy pool
+  padding.ts      — size-bucket padding + per-epoch-rekeyed decoy pool
   codec.ts        — KFLT byte codec: serializeFilter / parseFilter (hostile-input trust boundary)
   sign.ts         — Schnorr (BIP340) signFilterBlob / verifyFilterBlob
   capability.ts   — presence-capability tokens (./capability subpath)

@@ -61,7 +61,7 @@ const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
 if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
 ```
 
-### 4. The count band leaks a coarse count by design; padding hides only the fine count
+### 4. The count band leaks a coarse count by design; padding hides only the fine count — and a FIXED decoy set is itself diffable
 
 Size-bucket padding rounds the *inserted-key* count up to a power-of-two bucket by
 adding decoys, so the serialized array size reveals only the coarse bucket.
@@ -70,13 +70,29 @@ However:
 - `member_count_band` (header offset 28) records the **true** count's
   power-of-two bucket and **leaks that coarse count by design**. Padding hides the
   *fine* count, never the bucket.
-- Without a **stable** `decoySeedHex`, padding decoys are CSPRNG-random and
-  **churn across epochs**. An attacker who collects two epochs' blobs can diff the
-  fingerprint arrays: entries that persist are decoys, entries that change are
-  real members joining/leaving. **Pass a stable `decoySeedHex`** (a per-server
-  secret) to make the decoys byte-identical across rebuilds and defeat this
-  version-diffing. The unstable path is allowed but is a documented trade-off the
-  caller opts into by omitting the seed.
+- **A stable decoy set reused across epochs does not hide churn — it enables
+  diffing it precisely.** Fuse fingerprint slots are XOR-shared across every
+  inserted key (member and decoy alike); no slot "belongs" to one key. Measured
+  on a 700-member pool at bucket 1024: a **fixed** decoy set diffs **0**
+  fingerprint slots between two epochs with no membership change, and only
+  **~3** slots when exactly one member swapped (≥2 swaps: ~1000 differ). A
+  non-salt-holder diffing two published blobs therefore learns, with high
+  confidence, *whether membership changed at all* and *whether it was exactly
+  one swap* — an activity-leak with no per-slot attribution needed. Earlier
+  guidance recommending a fixed `decoySeedHex` as the safer default was
+  **backwards**; it is now corrected below.
+- What actually defeats this: `buildMembershipFilter` now derives the decoy seed
+  actually used from **`(decoySeedHex, epoch)`** (see PROTOCOL.md §2.8) —
+  rebuilding the SAME epoch with the SAME `decoySeedHex` still reproduces a
+  byte-identical blob, but each NEW epoch gets a fresh, uncorrelated decoy set.
+  Pass a `decoySeedHex` (now automatically epoch-rekeyed) for this behaviour, or
+  omit it for CSPRNG-random decoys (unstable even within an epoch). Either
+  choice defeats cross-epoch diffing; a decoy set that is stable **forever**
+  (the pre-fix behaviour) does not.
+- **Degenerate case:** when the true member count already equals the bucket
+  size (`n == band`), padding adds **zero** decoys regardless of mode — the
+  fingerprint array then diffs *exactly* across epochs, because there is
+  nothing else in the mix to obscure it.
 
 ### 5. Salt rotation defeats array-diffing by non-holders — with a stated residual
 
@@ -87,7 +103,7 @@ still track X's join/leave across epochs by **re-testing** X each epoch (computi
 `memberKey(X, salt_epoch)` and querying). Salt rotation does **not** stop targeted
 presence-tracking of a specific held key.
 
-### 6. Capability tokens are subject consent, not filter provenance
+### 6. Capability tokens are subject consent, not filter provenance — and are BEARER tokens, not one-time tokens
 
 A `PresenceCapability` is signed by the **subject** — it means "you may test MY
 presence here, until `expiresAt`." It says **nothing** about whether the filter is
@@ -95,14 +111,50 @@ genuine. A consumer holding a valid capability **must still** pin-verify the
 filter (§3) before trusting the hit. Consent and provenance are orthogonal; the
 kit keeps them in separate signatures.
 
-`saltHint = ''` in a capability corresponds to an **open-pool** capability: the
-value tested is the **bare open-pool form** `memberKey(subjectPubHex)` (the
-pubkey itself), **not** `memberKey(subjectPubHex, '')` (which is
-`sha256('' ‖ pk)` — the keyed value for an empty salt, and never a member of an
-open pool). `testWithCapability` branches on the empty hint so an empty-hint
-capability matches the open pool it names — noted so an empty hint is neither
-mistaken for a malformed token nor silently turned into a non-matching keyed
-value.
+**Stated plainly, because earlier docs implied otherwise: this is a bearer
+token, reusable by anyone holding it, any number of times, until `expiresAt` —
+it is not one-time, and nothing in the token or the check binds it to a single
+use or a single bearer.** The subject's signature is *consent* ("I allow
+testing of my presence, until then"); it is **not** bearer-binding — it does
+not name or restrict who may hold or forward the token.
+
+What the token DOES narrowly guarantee: it reveals **only the subject's own
+pool value** (`memberValue` — `memberKey(subjectPubHex, salt)` for a keyed pool,
+or `subjectPubHex` itself for an open pool), computed once at issue time from a
+salt the subject supplies and immediately discards. It **never** carries the
+pool salt itself. This is an audit fix: the pre-fix design carried the raw salt
+as a `saltHint` field, which meant holding **any one** subject's capability
+handed the bearer everything needed to compute `memberKey(anyPk, saltHint)` for
+**any** candidate — i.e. holding one friend's cap was equivalent to holding
+salt-holder access to the *entire* keyed pool (§1), not consent to test one
+person. `memberValue` confines the bearer to the one subject named on the token.
+
+**A capability is also not bound to a specific filter beyond the free-form
+`serverId` string.** Nothing cross-checks `serverId` against a filter's signer
+or contents — a capability naming server A's `serverId` will test true against
+ANY filter a bearer runs it against, if that filter happens to contain
+`memberValue`. Pin-verify the filter regardless, and use actually-unique
+`serverId` values per deployment if that distinction matters (PROTOCOL.md §5.3).
+
+**`expiresAt` only bounds `testWithCapability` — it does NOT bound `memberValue`
+itself.** Once a bearer has SEEN `memberValue` (from a valid capability, or
+leaked any other way), nothing stops them calling
+`testMembership(filter, memberValue)` directly, skipping `testWithCapability`
+and its expiry check entirely, for as long as `memberValue` remains a real
+value in the pool: that is every future epoch, until the pool's keyed salt
+rotates (rotation changes `memberKey(pk, salt)`, and so changes `memberValue`
+too) — or **indefinitely** for an open pool, where `memberValue` is the bare
+subject pubkey and never changes. **Salt rotation is the only actual
+revocation mechanism.** `expiresAt` is a courtesy bound on the convenience
+wrapper, not a cryptographic limit on how long a disclosed `memberValue` stays
+testable.
+
+Omitting `salt` at issue is an **open-pool** capability: `memberValue` is the
+**bare open-pool form** `memberKey(subjectPubHex)` (the pubkey itself), **not**
+`memberKey(subjectPubHex, '')` (which is `sha256('' ‖ pk)` — the keyed value for
+an *empty-string* salt, and never a member of an open pool). Passing `salt: ''`
+explicitly is different again: it is a valid even-length-hex keyed salt and
+routes through the keyed branch, producing `sha256('' ‖ pk)`.
 
 ### 7. Keyed mode trades third-party probing for server-side pull-auth logging
 

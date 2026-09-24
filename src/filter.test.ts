@@ -142,3 +142,62 @@ describe('testMembership — 64-hex input guard (kit-shaped error at the public 
     expect(testMembership(f, member.toUpperCase())).toBe(true)
   })
 })
+
+// B3 (audit fix) — buildMembershipFilter validates EVERY input key as 64-hex,
+// case-insensitive, and lowercases BEFORE dedup so a case-variant duplicate
+// collapses to one entry instead of surviving to break fuse peeling.
+describe('buildMembershipFilter — input key validation (B3 audit fix)', () => {
+  it('a mixed-case duplicate (same key, different case) builds fine and dedupes to one member', () => {
+    const base = pubkeys(4, 51).map((pk) => memberKey(pk))
+    const withCaseDupe = [...base, (base[0] as string).toUpperCase()]
+    const f = buildMembershipFilter(withCaseDupe, { epoch: EPOCH, padToBucket: false })
+    for (const k of base) expect(testMembership(f, k)).toBe(true)
+    // 4 distinct keys after dedup (the uppercase variant collapsed onto index 0).
+    expect(f._memberCountBand).toBe(4)
+  })
+
+  it('throws naming the offending index on a non-hex key', () => {
+    const keys = [memberKey(pubkeys(1, 52)[0] as string), 'not-hex-at-all-'.padEnd(64, '0')]
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH })).toThrow(/memberKeysHex\[1\]/)
+  })
+
+  it('throws naming the offending index on an odd-length key', () => {
+    const keys = [memberKey(pubkeys(1, 53)[0] as string), 'ab'.repeat(31) + 'a'] // 63 chars
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH })).toThrow(/memberKeysHex\[1\]/)
+  })
+
+  it('throws naming the offending index on a 66-hex key (too long)', () => {
+    const keys = [memberKey(pubkeys(1, 54)[0] as string), 'ab'.repeat(33)] // 66 chars
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH })).toThrow(/memberKeysHex\[1\]/)
+  })
+})
+
+// B7 (audit fix) — epoch must be a non-negative safe integer at build time (a
+// negative epoch previously wrapped to 2^64-1 on the wire via setBigUint64).
+describe('buildMembershipFilter — epoch validation (B7 audit fix)', () => {
+  const keys = pubkeys(3, 60).map((pk) => memberKey(pk))
+
+  it('rejects a negative epoch', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: -1 })).toThrow(/epoch/)
+  })
+
+  it('rejects a fractional epoch', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: 1.5 })).toThrow(/epoch/)
+  })
+
+  it('rejects a non-finite epoch', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: Number.NaN })).toThrow(/epoch/)
+    expect(() => buildMembershipFilter(keys, { epoch: Infinity })).toThrow(/epoch/)
+  })
+
+  it('rejects an epoch above Number.MAX_SAFE_INTEGER', () => {
+    expect(() =>
+      buildMembershipFilter(keys, { epoch: Number.MAX_SAFE_INTEGER + 2 }),
+    ).toThrow(/epoch/)
+  })
+
+  it('accepts epoch 0 and a normal epoch', () => {
+    expect(() => buildMembershipFilter(keys, { epoch: 0 })).not.toThrow()
+    expect(() => buildMembershipFilter(keys, { epoch: EPOCH })).not.toThrow()
+  })
+})

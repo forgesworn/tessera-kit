@@ -47,9 +47,9 @@ function keyedFilterFor(
 
 /** Build an OPEN pool (no salt ⇒ keyed flag false) whose member set is the given
  *  pubkeys transformed via the BARE open-pool form `memberKey(pk)`. This is the
- *  exact form an `saltHint:''` capability must match against (audit fix): an
- *  empty-hint capability is an OPEN-pool capability, so its membership value is
- *  `memberKey(subjectPub)` (bare), NOT `memberKey(subjectPub, '')` (= sha256('' ‖ pk)). */
+ *  exact form an open-pool capability (`salt` omitted at issue) must match
+ *  against: its `memberValue` is `memberKey(subjectPub)` (bare), computed once at
+ *  issue time and carried on the token (audit fix — the value, never the salt). */
 function openFilterFor(includedPubHex: string[], extra = 20) {
   const noise = Array.from({ length: extra }, (_, i) =>
     bytesToHex(sha256(new Uint8Array([i & 255, (i >> 8) & 255, 0x0d]))),
@@ -62,7 +62,7 @@ function baseParams() {
   return {
     serverId: SERVER_ID,
     subjectPubHex: SUBJECT.pubHex,
-    saltHint: SALT,
+    salt: SALT,
     expiresAt: EPOCH + 3600,
   }
 }
@@ -70,11 +70,15 @@ function baseParams() {
 // --- issue → verify round-trip -------------------------------------------
 
 describe('issuePresenceCapability / testWithCapability — round-trip', () => {
-  it('issues a well-formed capability (fields preserved, sig is 64-byte hex)', () => {
+  it('issues a well-formed capability (fields preserved, memberValue derived, sig is 64-byte hex)', () => {
     const cap = issuePresenceCapability(baseParams(), SUBJECT.privHex)
     expect(cap.serverId).toBe(SERVER_ID)
     expect(cap.subjectPubHex).toBe(SUBJECT.pubHex)
-    expect(cap.saltHint).toBe(SALT)
+    // memberValue = memberKey(subjectPubHex, salt) for a keyed pool — NOT the
+    // salt itself (audit fix: v1 carried the salt as `saltHint`).
+    expect(cap.memberValue).toBe(memberKey(SUBJECT.pubHex, SALT))
+    expect(cap.memberValue).toMatch(/^[0-9a-f]{64}$/)
+    expect(cap).not.toHaveProperty('saltHint')
     expect(cap.expiresAt).toBe(EPOCH + 3600)
     expect(cap.sig).toMatch(/^[0-9a-f]{128}$/) // 64-byte Schnorr sig as hex
   })
@@ -92,29 +96,27 @@ describe('issuePresenceCapability / testWithCapability — round-trip', () => {
   })
 })
 
-// --- empty saltHint ⇒ OPEN-pool capability matches a real open pool (audit fix) --
+// --- omitted salt ⇒ OPEN-pool capability matches a real open pool -------
 //
-// SECURITY.md §6: "saltHint = '' corresponds to an open-pool capability (the value
-// tested is the open-pool form)." Before the fix, testWithCapability ALWAYS computed
-// `memberKey(subjectPubHex, saltHint)`, so for an empty hint it produced
-// `memberKey(pk, '') = sha256('' ‖ pk)` — which is NEVER in an open pool built over
-// the bare `memberKey(pk)`. The capability therefore could never match an open pool,
-// a false-negative the docs explicitly claimed didn't exist. These tests pin the
-// documented behaviour: an empty-hint cap is tested against the BARE open-pool value.
+// SECURITY.md §6 / PROTOCOL.md §5: omitting `salt` at issue is an OPEN-pool
+// capability — `memberValue` is the BARE `memberKey(subjectPub)` form, so it
+// matches a real open pool (never `memberKey(pk, '')`, which is the keyed value
+// for an empty salt and never a member of an open pool built over bare pubkeys).
 
-describe('testWithCapability — empty saltHint matches an OPEN pool (audit fix)', () => {
+describe('issuePresenceCapability — omitted salt matches an OPEN pool', () => {
   it('tests TRUE against a real open pool that INCLUDES the bare memberKey(subjectPub)', () => {
     const cap = issuePresenceCapability(
-      { ...baseParams(), saltHint: '' },
+      { serverId: SERVER_ID, subjectPubHex: SUBJECT.pubHex, expiresAt: EPOCH + 3600 },
       SUBJECT.privHex,
     )
+    expect(cap.memberValue).toBe(SUBJECT.pubHex)
     const f = openFilterFor([SUBJECT.pubHex]) // open pool built over memberKey(pk)
     expect(testWithCapability(f, cap, EPOCH)).toBe(true)
   })
 
   it('tests FALSE against an open pool that does NOT include the subject', () => {
     const cap = issuePresenceCapability(
-      { ...baseParams(), saltHint: '' },
+      { serverId: SERVER_ID, subjectPubHex: SUBJECT.pubHex, expiresAt: EPOCH + 3600 },
       SUBJECT.privHex,
     )
     const f = openFilterFor([]) // subject absent, only noise
@@ -142,8 +144,8 @@ describe('testWithCapability — tampered field throws "capability signature inv
     expect(() => testWithCapability(f(), cap, EPOCH)).toThrow('capability signature invalid')
   })
 
-  it('mutating saltHint after issuance breaks the signature', () => {
-    const cap: PresenceCapability = { ...cap0(), saltHint: 'aabbccdd' }
+  it('mutating memberValue after issuance breaks the signature', () => {
+    const cap: PresenceCapability = { ...cap0(), memberValue: 'aa'.repeat(32) }
     expect(() => testWithCapability(f(), cap, EPOCH)).toThrow('capability signature invalid')
   })
 
@@ -182,19 +184,42 @@ describe('testWithCapability — expiry', () => {
     const f = keyedFilterFor([], SALT) // subject absent — would be false if tested
     expect(() => testWithCapability(f, cap, cap.expiresAt + 1)).toThrow('capability expired')
   })
-})
 
-// --- wrong saltHint (valid sig, salt mismatch) ---------------------------
-
-describe('testWithCapability — wrong saltHint', () => {
-  it('a validly-signed cap whose saltHint differs from the filter salt tests false', () => {
-    // Issue a capability whose saltHint is WRONG_SALT (signed over WRONG_SALT, so
-    // the sig is internally valid)...
-    const WRONG_SALT = 'ffeeddccbbaa'
+  it('throws on a non-finite resolved `now` instead of silently skipping the expiry check (audit fix)', () => {
+    // Before the fix, `NaN > expiresAt` is always false, so an expired-by-design
+    // capability (expiresAt in the past) would sail through with an injected
+    // NaN clock. It must now throw instead.
     const cap = issuePresenceCapability(
-      { ...baseParams(), saltHint: WRONG_SALT },
+      { ...baseParams(), expiresAt: 100 },
       SUBJECT.privHex,
     )
+    const f = keyedFilterFor([SUBJECT.pubHex], SALT)
+    expect(() => testWithCapability(f, cap, Number.NaN)).toThrow()
+    // And it must NOT return `true` (the pre-fix bug's observable symptom).
+    let result: boolean | undefined
+    let threw = false
+    try {
+      result = testWithCapability(f, cap, Number.NaN)
+    } catch {
+      threw = true
+    }
+    expect(threw).toBe(true)
+    expect(result).toBeUndefined()
+  })
+})
+
+// --- wrong salt (valid sig, salt mismatch) ---------------------------
+
+describe('issuePresenceCapability — wrong salt at issue time', () => {
+  it('a capability issued under the WRONG salt has a memberValue absent from the real (differently-salted) pool', () => {
+    // Issue a capability whose memberValue is derived from WRONG_SALT (signed
+    // over that memberValue, so the sig is internally valid)...
+    const WRONG_SALT = 'ffeeddccbbaa'
+    const cap = issuePresenceCapability(
+      { ...baseParams(), salt: WRONG_SALT },
+      SUBJECT.privHex,
+    )
+    expect(cap.memberValue).toBe(memberKey(SUBJECT.pubHex, WRONG_SALT))
     // ...but the FILTER was built under the real SALT. memberKey(subj, WRONG_SALT)
     // is not in the pool, so the subject isn't found.
     const f = keyedFilterFor([SUBJECT.pubHex], SALT)
@@ -221,7 +246,7 @@ describe('colon-in-serverId rejection (delimiter-injection guard)', () => {
     const cap: PresenceCapability = {
       serverId: 'host:with:colons',
       subjectPubHex: SUBJECT.pubHex,
-      saltHint: SALT,
+      memberValue: memberKey(SUBJECT.pubHex, SALT),
       expiresAt: EPOCH + 3600,
       sig: '00'.repeat(64),
     }
@@ -262,15 +287,15 @@ describe('issuePresenceCapability — field validation', () => {
     ).toThrow()
   })
 
-  it('rejects an odd-length saltHint', () => {
+  it('rejects an odd-length salt', () => {
     expect(() =>
-      issuePresenceCapability({ ...baseParams(), saltHint: 'abc' }, SUBJECT.privHex),
+      issuePresenceCapability({ ...baseParams(), salt: 'abc' }, SUBJECT.privHex),
     ).toThrow()
   })
 
-  it('rejects a non-hex saltHint', () => {
+  it('rejects a non-hex salt', () => {
     expect(() =>
-      issuePresenceCapability({ ...baseParams(), saltHint: 'zz' }, SUBJECT.privHex),
+      issuePresenceCapability({ ...baseParams(), salt: 'zz' }, SUBJECT.privHex),
     ).toThrow()
   })
 
@@ -289,10 +314,42 @@ describe('issuePresenceCapability — field validation', () => {
     ).toThrow()
   })
 
-  it('accepts an EMPTY saltHint (even-length hex, length 0) — open-pool hint', () => {
-    // saltHint '' is even-length hex; memberKey(pk, '') = sha256('' || pk).
-    const cap = issuePresenceCapability({ ...baseParams(), saltHint: '' }, SUBJECT.privHex)
-    expect(cap.saltHint).toBe('')
+  it('rejects a negative expiresAt (audit fix — must be a NON-NEGATIVE safe integer)', () => {
+    expect(() =>
+      issuePresenceCapability({ ...baseParams(), expiresAt: -1 }, SUBJECT.privHex),
+    ).toThrow()
+  })
+
+  it('rejects a fractional expiresAt (audit fix — must be an INTEGER, canonical across languages)', () => {
+    expect(() =>
+      issuePresenceCapability({ ...baseParams(), expiresAt: 1.5 }, SUBJECT.privHex),
+    ).toThrow()
+  })
+
+  it('rejects an expiresAt above Number.MAX_SAFE_INTEGER (audit fix — canonicalisation)', () => {
+    expect(() =>
+      issuePresenceCapability(
+        { ...baseParams(), expiresAt: Number.MAX_SAFE_INTEGER + 2 },
+        SUBJECT.privHex,
+      ),
+    ).toThrow()
+  })
+
+  it('accepts an EMPTY salt string as an even-length-hex keyed salt (memberKey("" ‖ pk))', () => {
+    // salt '' is even-length hex, distinct from omitting `salt` entirely: it
+    // still routes through memberKey's KEYED branch (`saltHex !== undefined`),
+    // producing sha256('' || pk) — NOT the open-pool bare-pubkey form.
+    const cap = issuePresenceCapability({ ...baseParams(), salt: '' }, SUBJECT.privHex)
+    expect(cap.memberValue).toBe(memberKey(SUBJECT.pubHex, ''))
+    expect(cap.memberValue).not.toBe(SUBJECT.pubHex)
+  })
+
+  it('omitting salt entirely yields the BARE open-pool memberValue (subjectPubHex itself)', () => {
+    const cap = issuePresenceCapability(
+      { serverId: SERVER_ID, subjectPubHex: SUBJECT.pubHex, expiresAt: EPOCH + 3600 },
+      SUBJECT.privHex,
+    )
+    expect(cap.memberValue).toBe(SUBJECT.pubHex)
   })
 })
 
@@ -306,8 +363,13 @@ describe('testWithCapability — field validation', () => {
     expect(() => testWithCapability(f(), cap, EPOCH)).toThrow()
   })
 
-  it('throws on an odd-length saltHint', () => {
-    const cap: PresenceCapability = { ...issuePresenceCapability(baseParams(), SUBJECT.privHex), saltHint: 'abc' }
+  it('throws on a non-64-hex memberValue', () => {
+    const cap: PresenceCapability = { ...issuePresenceCapability(baseParams(), SUBJECT.privHex), memberValue: 'abc' }
+    expect(() => testWithCapability(f(), cap, EPOCH)).toThrow()
+  })
+
+  it('throws on a negative expiresAt', () => {
+    const cap: PresenceCapability = { ...issuePresenceCapability(baseParams(), SUBJECT.privHex), expiresAt: -1 }
     expect(() => testWithCapability(f(), cap, EPOCH)).toThrow()
   })
 
@@ -334,5 +396,37 @@ describe('issuePresenceCapability — subject priv zeroized after issuance', () 
     )
     expect(src).toMatch(/finally/)
     expect(src).toMatch(/\.fill\(0\)/)
+  })
+})
+
+// --- B1 audit fix: a capability no longer discloses the pool salt --------
+//
+// The whole point of the fix: holding a capability for one friend must NOT hand
+// the bearer the means to probe every OTHER member of the same keyed pool. The
+// old `saltHint` field WAS the pool salt in clear; `memberValue` is only this one
+// subject's derived value and cannot be inverted back to the salt or reused to
+// compute anyone else's value.
+
+describe('B1 — capability does not leak the pool salt', () => {
+  it('the capability object never carries the raw salt string anywhere in its own fields', () => {
+    const cap = issuePresenceCapability(baseParams(), SUBJECT.privHex)
+    const values = Object.values(cap)
+    expect(values).not.toContain(SALT)
+    // memberValue is a sha256 digest — no relation to the salt's raw bytes/hex.
+    expect(cap.memberValue).not.toBe(SALT)
+  })
+
+  it('memberValue cannot be used to compute a DIFFERENT member\'s value (it is not the salt)', () => {
+    const cap = issuePresenceCapability(baseParams(), SUBJECT.privHex)
+    const OTHER = keypairFromSeed(0x88)
+    // A bearer who only holds `cap.memberValue` has no way to derive
+    // memberKey(OTHER.pubHex, SALT) from it — unlike v1, where holding the raw
+    // salt let a bearer compute memberKey(anyPk, saltHint) for ANY candidate.
+    const otherRealValue = memberKey(OTHER.pubHex, SALT)
+    expect(cap.memberValue).not.toBe(otherRealValue)
+    // (There is no exported function that takes a memberValue and a candidate
+    // pubkey and returns another member's value — the fix is structural, not
+    // just a missing helper; this test pins that memberValue and the salt are
+    // simply different, unrelated 64-hex strings.)
   })
 })

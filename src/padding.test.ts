@@ -210,6 +210,81 @@ describe('band reflects TRUE count even when padded', () => {
   })
 })
 
+// B10 (audit fix) — decoySeedHex must be even-length hex of >= 16 bytes (32 hex
+// chars). Validated at the buildMembershipFilter boundary (padMembersToBucket /
+// deriveDecoys themselves are unchanged and remain lenient for direct callers).
+describe('buildMembershipFilter — decoySeedHex validation (B10 audit fix)', () => {
+  const real = pubkeys(5, 61).map((pk) => memberKey(pk))
+
+  it('throws on an empty decoySeedHex (previously accepted — public, predictable decoys)', () => {
+    expect(() =>
+      buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: '' }),
+    ).toThrow(/decoySeedHex/)
+  })
+
+  it('throws on an odd-length decoySeedHex (previously leaked a raw @noble RangeError)', () => {
+    expect(() =>
+      buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: 'abc' }),
+    ).toThrow(/decoySeedHex/)
+  })
+
+  it('throws on a non-hex decoySeedHex', () => {
+    expect(() =>
+      buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: 'zz'.repeat(16) }),
+    ).toThrow(/decoySeedHex/)
+  })
+
+  it('throws on a well-formed but too-short (< 16 byte) decoySeedHex', () => {
+    expect(() =>
+      buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: 'aa'.repeat(15) }), // 30 hex chars = 15 bytes
+    ).toThrow(/decoySeedHex/)
+  })
+
+  it('accepts a decoySeedHex of exactly 16 bytes (32 hex chars — the boundary)', () => {
+    expect(() =>
+      buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: 'aa'.repeat(16) }),
+    ).not.toThrow()
+  })
+})
+
+// B2 (audit fix) — decoys are derived per-epoch from (decoySeedHex, epoch), not
+// from decoySeedHex alone: a rebuild of the SAME epoch is byte-identical, but a
+// DIFFERENT epoch gets a fresh, uncorrelated decoy set.
+describe('buildMembershipFilter — per-epoch decoy derivation (B2 audit fix)', () => {
+  const real = pubkeys(5, 62).map((pk) => memberKey(pk))
+
+  it('same seed + same epoch ⇒ identical serialized blob (rebuild stability preserved)', () => {
+    const a = buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: SEED })
+    const b = buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: SEED })
+    expect(serializeFilter(a)).toEqual(serializeFilter(b))
+  })
+
+  it('same seed + a DIFFERENT epoch ⇒ many differing fingerprint slots (fresh decoys per epoch)', () => {
+    const a = buildMembershipFilter(real, { epoch: EPOCH, decoySeedHex: SEED })
+    const b = buildMembershipFilter(real, { epoch: EPOCH + 1, decoySeedHex: SEED })
+    const blobA = serializeFilter(a)
+    const blobB = serializeFilter(b)
+    // Same geometry (same true count/band), so directly comparable byte-for-byte
+    // over the fingerprint region — but the header epoch field differs too, so
+    // count differing bytes only in the fingerprint array [128, end).
+    expect(blobA.length).toBe(blobB.length)
+    let diffCount = 0
+    for (let i = 128; i < blobA.length; i++) {
+      if (blobA[i] !== blobB[i]) diffCount++
+    }
+    // The decoy set is derived from a different epoch, so it is effectively a
+    // fresh CSPRNG-shaped set relative to the other epoch's — expect substantial
+    // fingerprint churn, not the "0 slots for no change" signature of a fixed
+    // decoy set reused across epochs.
+    expect(diffCount).toBeGreaterThan(0)
+    // Both filters still contain every real member regardless of decoy churn.
+    for (const k of real) {
+      expect(testMembership(a, k)).toBe(true)
+      expect(testMembership(b, k)).toBe(true)
+    }
+  })
+})
+
 describe('real members are never excluded by a decoy collision', () => {
   it('builds with decoy-shaped members; every real member still tests true', () => {
     // Construct a member set that INCLUDES the very decoys this seed would

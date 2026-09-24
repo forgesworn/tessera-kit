@@ -98,3 +98,33 @@ describe('decodeFilterPublicationContent — oversized content rejected by the c
     expect(() => decodeFilterPublicationContent('not valid base64 @@@@')).toThrow()
   })
 })
+
+// B6 (audit fix) — maxBytes must be a non-negative safe integer, and is clamped
+// to KFLT_MAX_BLOB_BYTES rather than trusted verbatim. Before the fix, a NaN or
+// negative maxBytes made the size-cap pre-check (`content.length > maxEncodedLen`)
+// vacuously false, disabling the cap entirely.
+describe('decodeFilterPublicationContent — maxBytes validation (B6 audit fix)', () => {
+  it('throws on a NaN maxBytes instead of silently disabling the cap', () => {
+    const tpl = buildFilterPublication({ kind: 1, tags: [], blob: fakeBlob(1000), createdAt: 1 })
+    expect(() => decodeFilterPublicationContent(tpl.content, Number.NaN)).toThrow(/maxBytes/)
+  })
+
+  it('throws on a negative maxBytes', () => {
+    const tpl = buildFilterPublication({ kind: 1, tags: [], blob: fakeBlob(1000), createdAt: 1 })
+    expect(() => decodeFilterPublicationContent(tpl.content, -1)).toThrow(/maxBytes/)
+  })
+
+  it('throws on a fractional maxBytes', () => {
+    const tpl = buildFilterPublication({ kind: 1, tags: [], blob: fakeBlob(16), createdAt: 1 })
+    expect(() => decodeFilterPublicationContent(tpl.content, 10.5)).toThrow(/maxBytes/)
+  })
+
+  it('clamps a caller-supplied maxBytes above KFLT_MAX_BLOB_BYTES down to the hard cap', async () => {
+    const { KFLT_MAX_BLOB_BYTES } = await import('./types.js')
+    const tpl = buildFilterPublication({ kind: 1, tags: [], blob: fakeBlob(16), createdAt: 1 })
+    // A small blob still decodes fine even when the caller asks for a cap far
+    // above the format's own maximum — the clamp does not reject good input.
+    const decoded = decodeFilterPublicationContent(tpl.content, KFLT_MAX_BLOB_BYTES * 10)
+    expect(decoded.length).toBe(16)
+  })
+})

@@ -47,10 +47,15 @@ const present = testMembership(filter, memberKey(friendPubkey))
   signer-pubkey/Schnorr sig) + a u16 fingerprint array. See PROTOCOL.md.
 - **Provenance signature** — Schnorr over `sha256(blob[0..64) ‖ sha256(blob[128..end)))`.
   `verifyFilterBlob` checks consistency; trust = comparing the signer to a PINNED key.
-- **Capability token** — subject-signed consent to be located on a keyed server
-  (`./capability`); still pin-verify the filter.
-- **Padding** — rounds the member count to a power-of-two bucket with decoys; pass
-  a stable `decoySeedHex` to stop epoch-to-epoch churn-diffing.
+- **Capability token** — subject-signed consent to be located (`./capability`); a
+  BEARER token (reusable until `expiresAt`, not one-time), whose `memberValue`
+  field reveals only the subject's own pool value, never the pool salt; still
+  pin-verify the filter.
+- **Padding** — rounds the member count to a power-of-two bucket with decoys.
+  Pass `decoySeedHex` (≥16 bytes hex) for decoys that are stable WITHIN an epoch
+  but automatically re-keyed PER epoch (derived from `decoySeedHex + epoch`) —
+  this is what stops epoch-to-epoch churn-diffing; a decoy set reused forever
+  does NOT (fuse slots are XOR-shared, so a fixed set diffs exactly with churn).
 
 ## API Surface
 
@@ -61,12 +66,14 @@ const present = testMembership(filter, memberKey(friendPubkey))
 - `serializeFilter(filter)` / `parseFilter(blob)` — KFLT encode / hardened decode
 - `signFilterBlob(blob, signerPrivHex)` — sign in place (Schnorr)
 - `verifyFilterBlob(blob)` — `{ signerPubkeyHex, ok }`; never throws
-- `nextPowerOfTwoBand(n)` / `deriveDecoys(seedHex, count)` — size band + stable decoys
+- `verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? })` — recommended: pin-verify + parse + freshness in one call; use the RETURNED `filter.epoch` for freshness, never a Nostr `epoch` tag
+- `nextPowerOfTwoBand(n)` / `deriveDecoys(seedHex, count)` — size band + deterministic decoy derivation (a given `(seedHex, count)` always yields the same decoys; see "Padding" above for why `buildMembershipFilter` re-keys this per epoch rather than using a caller's `decoySeedHex` unchanged)
 - types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, `KFLT_*`
 
 `./capability`:
-- `issuePresenceCapability(p, subjectPrivHex)` / `testWithCapability(filter, cap, now?)`
-- type `PresenceCapability` (`serverId` must be colon-free)
+- `issuePresenceCapability(p, subjectPrivHex)` — `p.salt?` (optional keyed-pool salt, omit for open) is used only to derive `memberValue`; never stored on the token
+- `testWithCapability(filter, cap, now?)` — a BEARER check (reusable until `expiresAt`, not one-time)
+- type `PresenceCapability` = `{ serverId, subjectPubHex, memberValue, expiresAt, sig }` (`serverId` must be colon-free and is not bound to any filter)
 
 ## Security
 

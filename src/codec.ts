@@ -58,6 +58,11 @@ const MAGIC_3 = 0x54 // T
 
 const FLAG_KEYED = 0x01
 const FLAG_PADDED = 0x02
+// Bits 2-7 of `flags` are reserved for forward-compat and are never set by
+// `serializeFilter` (audit fix: `parseFilter` now rejects any blob that sets
+// one, rather than silently ignoring non-canonical input a future version
+// could misread — see FLAGS_RESERVED_MASK below).
+const FLAGS_RESERVED_MASK = 0xfc
 
 // Fuse arity = 3 ⇒ arrayLength = (segment_count + 2) * segment_length.
 const ARITY_MINUS_ONE = 2
@@ -226,11 +231,33 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
     throw new Error('KFLT: length mismatch')
   }
 
-  // Header scalars needed for the result. (epoch as LE u64 → Number; seed u32.)
-  const epoch = Number(dv.getBigUint64(OFF_EPOCH, true))
+  // Header scalars needed for the result. `epoch` is read as a BigInt FIRST and
+  // range-checked against Number.MAX_SAFE_INTEGER BEFORE the lossy BigInt→Number
+  // conversion (audit fix — a u64 epoch above 2^53 previously lost precision
+  // silently; `buildMembershipFilter` never emits one, but a hostile/corrupted
+  // blob could claim one, so we reject it explicitly here rather than convert).
+  const epochBig = dv.getBigUint64(OFF_EPOCH, true)
+  if (epochBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error('KFLT: epoch exceeds Number.MAX_SAFE_INTEGER')
+  }
+  const epoch = Number(epochBig)
   const seed = dv.getUint32(OFF_SEED, true)
   const flags = blob[OFF_FLAGS] as number
+  // Reserved flag bits 2-7 must be zero (audit fix — `serializeFilter` never
+  // sets them; a blob that does is non-canonical input a future version could
+  // misread differently, so we reject it now rather than silently ignore it).
+  if ((flags & FLAGS_RESERVED_MASK) !== 0) {
+    throw new Error('KFLT: reserved flag bits set')
+  }
   const memberCountBand = dv.getUint32(OFF_MEMBER_COUNT_BAND, true)
+  // `member_count_band` is `nextPowerOfTwoBand(trueCount)` (padding.ts), which is
+  // ALWAYS a power of two >= 1 for any count `serializeFilter` can actually
+  // produce, independent of `padToBucket` (the band reflects the true count, not
+  // whether padding was applied). A non-power-of-two value is therefore
+  // non-canonical input, never something the builder emits (audit fix).
+  if (!isPowerOfTwo(memberCountBand)) {
+    throw new Error('KFLT: member_count_band not a power of two')
+  }
 
   // 8. ONLY NOW allocate and read the fingerprint array (LE u16 × arrayLength).
   const fingerprints = new Uint16Array(arrayLength)

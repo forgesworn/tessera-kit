@@ -31,7 +31,8 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, concatBytes } from '@noble/hashes/utils.js'
 // Reuse the ONE definition of the byte layout from the codec — never re-hardcode
 // 32 / 64 / 128 here.
-import { OFF_SIGNER_PUBKEY, OFF_SIGNATURE, OFF_FINGERPRINTS } from './codec.js'
+import { OFF_SIGNER_PUBKEY, OFF_SIGNATURE, OFF_FINGERPRINTS, parseFilter } from './codec.js'
+import type { MembershipFilter } from './types.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -138,4 +139,79 @@ export function verifyFilterBlob(blob: Uint8Array): {
   }
 
   return { signerPubkeyHex, ok }
+}
+
+/**
+ * Combined pin-verify + parse + freshness helper (audit fix / TK-8 — B4).
+ *
+ * Doing `verifyFilterBlob` and `parseFilter` as two separate calls left the
+ * mandatory pinned-key comparison as something a consumer had to remember to
+ * bolt on themselves (`verifyFilterBlob` alone never throws — see its doc
+ * comment), and left "freshness" entirely unaddressed: nothing in this kit
+ * checked a filter's signed `epoch` against the last one a consumer had seen,
+ * so an OLDER, validly-signed blob could be replayed (a rollback). This helper
+ * makes the safe path the only path: it throws unless the blob is both
+ * pin-verified AND (optionally) no older than `minEpoch`.
+ *
+ * IMPORTANT — use the blob's SIGNED `epoch` (this function's freshness check),
+ * NOT a Nostr `["epoch"]` *tag* on any wrapping event. A tag is signed only by
+ * the Nostr publisher key, never by the pinned blob-signing key, and is never
+ * cross-checked against the blob's own signed `epoch` — relying on it for
+ * freshness lets a relay/MITM replay a stale blob under a freshly-tagged event.
+ * Track the highest `epoch` you've accepted per `(pinnedPubkeyHex)` and pass it
+ * back in as `minEpoch` on the next check.
+ *
+ * ALSO NOTE — a `KFLT` blob does not name the server/namespace it belongs to
+ * (there is no such field in the header; see `types.ts`/PROTOCOL.md §3). Pinning
+ * a key here defeats a THIRD PARTY's forged filter, but if you reuse ONE signing
+ * key across several servers or namespaces, a relay/MITM can serve server A's
+ * validly-signed blob as server B's and this helper will happily accept it (both
+ * pin-check and epoch check pass — the substitution is invisible at this layer).
+ * Use a DISTINCT signing key per server/namespace if that distinction matters.
+ *
+ * @param blob             the raw (signed) KFLT blob.
+ * @param opts.pinnedPubkeyHex the known/pinned server signing key (case-insensitive).
+ *                         MUST be 64 hex chars (x-only pubkey shape) — validated
+ *                         up front so a malformed pin can't accidentally compare
+ *                         unequal-but-still-truthy to every signer (audit fix).
+ * @param opts.minEpoch    optional: the last-seen epoch for this pinned key. A
+ *                         parsed filter whose `epoch < minEpoch` is rejected as
+ *                         stale/rolled-back. MUST be a non-negative safe integer
+ *                         when given — a `NaN`/negative/fractional `minEpoch`
+ *                         throws rather than silently comparing false against
+ *                         every `epoch` and accepting a stale blob (audit fix:
+ *                         `filter.epoch < NaN` is always `false`, the same
+ *                         footgun `testWithCapability`'s expiry check had — B5).
+ * @returns the parsed `MembershipFilter` — only on success.
+ * @throws if `pinnedPubkeyHex` is not 64 hex chars, `minEpoch` is given but not a
+ *         non-negative safe integer, the signature is invalid, the signer
+ *         doesn't match `pinnedPubkeyHex`, the blob fails to parse (malformed
+ *         structure), or the parsed `epoch` is older than `minEpoch`.
+ */
+export function verifyAndParseFilter(
+  blob: Uint8Array,
+  opts: { pinnedPubkeyHex: string; minEpoch?: number },
+): MembershipFilter {
+  if (typeof opts.pinnedPubkeyHex !== 'string' || !/^[0-9a-f]{64}$/i.test(opts.pinnedPubkeyHex)) {
+    throw new Error('verifyAndParseFilter: pinnedPubkeyHex must be 64 hex chars')
+  }
+  if (
+    opts.minEpoch !== undefined &&
+    (!Number.isSafeInteger(opts.minEpoch) || opts.minEpoch < 0)
+  ) {
+    throw new Error('verifyAndParseFilter: minEpoch must be a non-negative safe integer')
+  }
+  const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+  if (!ok || signerPubkeyHex.toLowerCase() !== opts.pinnedPubkeyHex.toLowerCase()) {
+    throw new Error(
+      'verifyAndParseFilter: signature invalid or signer does not match the pinned key',
+    )
+  }
+  // Only parse (which allocates/validates structure) AFTER the pin check passes
+  // — no reason to spend structural-validation work on a blob we'd reject anyway.
+  const filter = parseFilter(blob)
+  if (opts.minEpoch !== undefined && filter.epoch < opts.minEpoch) {
+    throw new Error('verifyAndParseFilter: filter epoch is older than minEpoch (stale/rollback)')
+  }
+  return filter
 }

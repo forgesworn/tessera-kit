@@ -19,29 +19,100 @@
 // corresponds to no real subject). `_memberCountBand` always records the TRUE
 // count's bucket, never the padded size.
 
+import { sha256 } from '@noble/hashes/sha2.js'
+import { bytesToHex, hexToBytes, concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { BinaryFuse16 } from './fuse.js'
 import { nextPowerOfTwoBand, padMembersToBucket } from './padding.js'
 import type { FilterBuildOptions, MembershipFilter } from './types.js'
+
+/** Every member key handed to `buildMembershipFilter` must already be a
+ *  `memberKey()` output: exactly 64 hex chars, case-insensitive (lowercased
+ *  before use). Anything else — non-hex, odd-length, 66-hex, etc. — throws
+ *  (audit fix: previously any string was accepted, so a case-variant duplicate
+ *  or a wrong-length key could reach fuse construction, either breaking peel
+ *  convergence or building an untestable member). */
+const HEX64_CI = /^[0-9a-f]{64}$/i
+
+/** `decoySeedHex` must be even-length hex of at least 16 bytes (32 hex chars)
+ *  when supplied (audit fix: an empty or too-short seed produced public,
+ *  predictable decoys; an odd-length seed leaked a raw @noble `RangeError`). */
+function assertDecoySeedHex(decoySeedHex: string): void {
+  if (
+    typeof decoySeedHex !== 'string' ||
+    !/^[0-9a-f]*$/i.test(decoySeedHex) ||
+    decoySeedHex.length % 2 !== 0
+  ) {
+    throw new Error('tessera-kit: decoySeedHex must be even-length hex')
+  }
+  if (decoySeedHex.length < 32) {
+    throw new Error('tessera-kit: decoySeedHex must be at least 16 bytes (32 hex chars)')
+  }
+}
+
+/** Big-endian 8-byte encoding of a non-negative safe-integer epoch. Used only by
+ *  the per-epoch decoy-seed derivation below (§B2) — distinct from the on-wire
+ *  `epoch` field, which is little-endian (codec.ts). */
+function u64be(n: number): Uint8Array {
+  const b = new Uint8Array(8)
+  new DataView(b.buffer).setBigUint64(0, BigInt(n), false)
+  return b
+}
+
+/**
+ * Derive the PER-EPOCH decoy seed actually passed to `padMembersToBucket`:
+ *
+ *   effectiveSeedHex = hex( sha256( utf8("tessera-decoy:v1:") ‖ bytes(seedHex) ‖ u64be(epoch) ) )
+ *
+ * Audit fix (B2): a fixed `decoySeedHex` produces the SAME decoy set every
+ * epoch. Fuse slots are XOR-shared across all inserted keys, so a stable decoy
+ * set makes the fingerprint array itself diffable across epochs — a non-holder
+ * who diffs two published blobs observes 0 changed slots when membership didn't
+ * change and ~3 changed slots when exactly one member swapped (measured), which
+ * leaks an activity signal despite the decoys never being individually
+ * identified. Rekeying the seed by epoch keeps a REBUILD of the SAME epoch
+ * byte-identical (determinism is preserved within an epoch — required for the
+ * golden-vector contract and for a server that rebuilds without changing
+ * anything) while giving every NEW epoch a fresh, uncorrelated decoy set, which
+ * is what actually defeats the diffing attack. `deriveDecoys` / `padMembersToBucket`
+ * themselves are unchanged — this only changes WHICH seed they are called with.
+ */
+function deriveEpochDecoySeedHex(seedHex: string, epoch: number): string {
+  const preimage = concatBytes(
+    utf8ToBytes('tessera-decoy:v1:'),
+    hexToBytes(seedHex.toLowerCase()),
+    u64be(epoch),
+  )
+  return bytesToHex(sha256(preimage))
+}
 
 /**
  * Build a membership filter over already-`memberKey`-transformed hex values.
  *
  * @param memberKeysHex  Member keys ALREADY produced by `memberKey()` (open or
- *                       keyed). Not re-salted here. Duplicates are tolerated —
- *                       they are de-duplicated before construction because fuse
- *                       peeling requires distinct keys.
- * @param opts           `epoch` is required; `fingerprintBits` defaults to 16
+ *                       keyed). Not re-salted here. Every key MUST be 64 hex
+ *                       chars (case-insensitive; lowercased before use) or this
+ *                       throws naming the offending index (audit fix). Duplicates
+ *                       (post-lowercasing) are tolerated — they are de-duplicated
+ *                       before construction because fuse peeling requires
+ *                       distinct keys.
+ * @param opts           `epoch` is required and MUST be a non-negative safe
+ *                       integer (audit fix — a negative epoch previously wrapped
+ *                       to 2^64-1 on the wire). `fingerprintBits` defaults to 16
  *                       (only 16 is implemented this phase); `salt` presence
  *                       only sets the `keyed` flag. `padToBucket` defaults to
  *                       TRUE — the deduped set is padded with decoys up to the
  *                       next power-of-two bucket before building, so the on-wire
  *                       array size reveals only the coarse bucket, not the fine
- *                       count (spec §7.5). Pass `decoySeedHex` for STABLE decoys
- *                       (deterministic across rebuilds — defeats churn-diffing);
- *                       omit it for the UNSTABLE CSPRNG path (padding still
- *                       happens, but churn is diffable across epochs — see
- *                       `padding.ts`). Pass `padToBucket: false` to build over
- *                       the deduped members only with no decoys.
+ *                       count (spec §7.5). Pass `decoySeedHex` (even-length hex,
+ *                       ≥16 bytes) for STABLE-PER-EPOCH decoys: rebuilding the
+ *                       SAME epoch with the SAME seed reproduces the identical
+ *                       blob, but each new epoch gets a fresh decoy set derived
+ *                       from `(decoySeedHex, epoch)` — see
+ *                       `deriveEpochDecoySeedHex` above and `padding.ts`. Omit it
+ *                       for the CSPRNG path (padding still happens, but decoys
+ *                       are unstable even within an epoch). Pass
+ *                       `padToBucket: false` to build over the deduped members
+ *                       only with no decoys.
  */
 export function buildMembershipFilter(
   memberKeysHex: string[],
@@ -54,14 +125,33 @@ export function buildMembershipFilter(
     throw new Error('tessera-kit: only fingerprintBits=16 implemented')
   }
 
-  // De-duplicate while preserving first-seen order (determinism). Distinct keys
-  // are a hard precondition of fuse construction.
+  // `epoch` must be a non-negative safe integer (audit fix — see `codec.ts`
+  // parseFilter's mirrored range check on the read side).
+  if (!Number.isSafeInteger(opts.epoch) || opts.epoch < 0) {
+    throw new Error('tessera-kit: epoch must be a non-negative safe integer')
+  }
+
+  if (opts.decoySeedHex !== undefined) {
+    assertDecoySeedHex(opts.decoySeedHex)
+  }
+
+  // Validate EVERY key as 64-hex (case-insensitive) BEFORE lowercasing/dedup —
+  // a clear, index-naming error beats a raw @noble `RangeError` or a peel
+  // failure 100 attempts later (audit fix). Lowercase BEFORE dedup so a
+  // case-variant duplicate (`AB..` / `ab..`) collapses to one entry instead of
+  // surviving as two distinct strings that hash to the same u64 and break fuse
+  // peeling.
   const seen = new Set<string>()
   const deduped: string[] = []
-  for (const k of memberKeysHex) {
-    if (!seen.has(k)) {
-      seen.add(k)
-      deduped.push(k)
+  for (let i = 0; i < memberKeysHex.length; i++) {
+    const k = memberKeysHex[i] as string
+    if (typeof k !== 'string' || !HEX64_CI.test(k)) {
+      throw new Error(`tessera-kit: memberKeysHex[${i}] must be 64 hex chars`)
+    }
+    const lower = k.toLowerCase()
+    if (!seen.has(lower)) {
+      seen.add(lower)
+      deduped.push(lower)
     }
   }
 
@@ -72,13 +162,18 @@ export function buildMembershipFilter(
 
   // Padding (spec §7.5): default ON. Pad the deduped set with decoys up to the
   // size bucket so the serialized array size reveals only the coarse bucket.
-  // `decoySeedHex` set ⇒ STABLE decoys (deterministic across rebuilds — defeats
-  // version-diffing of churn); omitted ⇒ UNSTABLE CSPRNG decoys (still padded,
-  // but churn becomes diffable across epochs). `padMembersToBucket` keeps the set
-  // a true set, so real members are never displaced by a decoy collision.
+  // `decoySeedHex` set ⇒ STABLE-PER-EPOCH decoys (deterministic within an epoch,
+  // fresh across epochs — defeats churn-diffing, see `deriveEpochDecoySeedHex`
+  // above); omitted ⇒ CSPRNG decoys (still padded, but unstable even within an
+  // epoch). `padMembersToBucket` keeps the set a true set, so real members are
+  // never displaced by a decoy collision.
   const padToBucket = opts.padToBucket ?? true
+  const effectiveSeedHex =
+    opts.decoySeedHex !== undefined
+      ? deriveEpochDecoySeedHex(opts.decoySeedHex, opts.epoch)
+      : undefined
   const keysToBuild = padToBucket
-    ? padMembersToBucket(deduped, _memberCountBand, opts.decoySeedHex)
+    ? padMembersToBucket(deduped, _memberCountBand, effectiveSeedHex)
     : deduped
 
   const _fuse = BinaryFuse16.build(keysToBuild)

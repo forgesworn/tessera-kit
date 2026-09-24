@@ -170,6 +170,44 @@ and any realistic deployment. Beyond that bound the 32-bit index space is
 exceeded; the cap and the recompute-before-allocate guard reject it long before
 it is reached in practice.
 
+### 2.8 Decoy padding — per-epoch seed derivation (audit fix, B2)
+
+When `padToBucket` is on (default) and the caller supplies `decoySeedHex`,
+`buildMembershipFilter` does **not** pass that seed to the decoy generator
+(`padding.ts`'s `deriveDecoys` / `padMembersToBucket`) directly. It first derives
+a per-epoch **effective** seed:
+
+```
+effectiveSeedHex = hex( sha256( utf8("tessera-decoy:v1:") ‖ bytes(decoySeedHex) ‖ u64be(epoch) ) )
+```
+
+`u64be` is big-endian here (distinct from the little-endian on-wire `epoch`
+field, §3) — this is an internal derivation input, not a wire value. The
+derived `effectiveSeedHex` is what actually reaches `padMembersToBucket`.
+
+**Why:** fuse fingerprint slots are XOR-shared across every inserted key
+(member and decoy alike) — no slot belongs to one key. A `decoySeedHex` reused
+byte-for-byte across epochs therefore does not hide churn the way a per-key
+model would suggest: measured on a 700-member pool at bucket 1024, a FIXED
+decoy set diffs **0** fingerprint slots between two epochs with no membership
+change and only **~3** slots when exactly one member swapped (≥2 swaps: ~1000).
+A non-salt-holder diffing two published blobs can read "did membership change,
+and was it exactly one swap" straight off the diff magnitude, with no per-slot
+attribution needed. Rekeying the seed by `(decoySeedHex, epoch)` keeps a
+REBUILD of the SAME epoch byte-identical (needed for the golden-vector contract
+and for caching) while making every NEW epoch's decoy set uncorrelated with the
+last — which is what actually defeats the diffing attack. `deriveDecoys` /
+`padMembersToBucket` are otherwise unchanged; only the seed handed to them
+changed.
+
+**Degenerate case:** when the true member count already equals the bucket size
+(`n == band`), zero decoys are added regardless of mode — the fingerprint array
+then diffs *exactly* across epochs, because there is nothing else in the mix.
+
+`decoySeedHex`, when supplied, MUST be even-length hex of **at least 16 bytes**
+(32 hex chars); a shorter, odd-length, or non-hex seed throws rather than
+producing public/predictable decoys or a raw `RangeError` (audit fix, B10).
+
 ---
 
 ## 3. `KFLT` blob byte format (v1)
@@ -202,6 +240,7 @@ Notes:
   **zero**; `signFilterBlob` fills them in place over the same layout.
 - The salt is **not** in the blob (§1). `flags.keyed` only signals the values
   were salted.
+- `epoch` (offset 8) is a non-negative safe integer on write and read — see §3.2.
 
 ### 3.1 `parseFilter` hardening (the trust boundary)
 
@@ -218,13 +257,31 @@ Notes:
    safe integers, and checks `128 + arrayLength*2 ≤ 64 MiB`;
 7. **recomputes the expected blob length** `128 + arrayLength*2` and requires it
    to equal `blob.length` **before allocating** the fingerprint array;
-8. only then allocates the `Uint16Array` and reads the fingerprints.
+8. reads `epoch` as a `u64` and requires it `≤ Number.MAX_SAFE_INTEGER` (a larger
+   value would lose precision in the lossy `BigInt→Number` conversion — rejected
+   rather than silently truncated; §5.5);
+9. requires `flags & 0xFC == 0` — reserved bits 2-7 must be zero (`serializeFilter`
+   never sets them; a blob that does is non-canonical, not merely forward-compat);
+10. requires `member_count_band` to be a power of two (`serializeFilter` always
+    writes `nextPowerOfTwoBand(trueCount)`, which is a power of two ≥ 1
+    regardless of `padToBucket` — see `padding.ts` — so anything else is
+    non-canonical);
+11. only then allocates the `Uint16Array` and reads the fingerprints.
 
 Every reachable failure throws an `Error`. A parse SUCCESS means **"well-formed,
 self-consistent bytes," not "trustworthy bytes."** `parseFilter` validates a
 self-consistent geometry but does **not** prove it is a geometry the builder
 would emit; trust comes from `verifyFilterBlob` against a **pinned key** (§4),
 **not** from parse.
+
+### 3.2 `epoch` range (build and parse)
+
+`buildMembershipFilter` requires `opts.epoch` to be a **non-negative safe
+integer** — a negative value would wrap to `2^64-1` under the LE64 `setBigUint64`
+write (§3), silently corrupting every later freshness comparison. `parseFilter`
+mirrors this on read: it accepts `epoch` up to `Number.MAX_SAFE_INTEGER` and
+rejects anything larger (§3.1 step 8) rather than returning a value that has
+already lost precision by being forced through `Number`.
 
 ---
 
@@ -278,42 +335,100 @@ the private-key byte copy in a `finally`.
 > if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
 > ```
 
+### 4.3 `verifyAndParseFilter` — the combined pin + parse + freshness helper
+
+`verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? }) → MembershipFilter`
+(`sign.ts`) makes the mandatory pin comparison (§4.2) and an optional freshness
+check the only path: it calls `verifyFilterBlob`, throws unless `ok` **and** the
+signer matches `pinnedPubkeyHex` (case-insensitive), then `parseFilter`s, then
+throws if `minEpoch` is given and the parsed `epoch < minEpoch`.
+
+**Freshness — use the blob's SIGNED `epoch`, never a Nostr `["epoch"]` tag.** A
+tag on a wrapping Nostr event is signed only by the event's Nostr publisher key,
+never by the pinned blob-signing key, and this kit never cross-checks a tag
+against the blob's own signed `epoch`. Relying on the tag for rollback
+protection lets a relay or MITM replay an old, validly-signed blob under a
+freshly-tagged event. Track the highest `epoch` you've accepted per pinned key
+and pass it back in as `minEpoch` on the next check (§6 restates this for the
+Nostr publication path specifically).
+
+**Cross-server/namespace substitution — the blob does not name its server.**
+Nothing in the 128-byte header (§3) identifies which server or namespace a
+filter belongs to; `pinnedPubkeyHex` is the ONLY binding a consumer has. If one
+signing key is reused across several servers or namespaces, a relay or MITM can
+serve server A's validly-signed blob in place of server B's, and both the pin
+check and the `minEpoch` check will pass — the substitution is invisible at this
+layer. **Use a distinct signing key per server/namespace** if that distinction
+matters to your deployment; `verifyAndParseFilter` cannot detect this on its own.
+
 ---
 
 ## 5. Presence-capability canonical bytes (`./capability`)
 
-A `PresenceCapability` is **subject consent** to be located on a keyed server. It
-is signed by the **subject** (the person whose presence may be tested), **not**
-the server — it is *not* filter provenance. Pin-verify the filter regardless.
+A `PresenceCapability` is **subject consent** to be located on a server. It is
+signed by the **subject** (the person whose presence may be tested), **not** the
+server — it is *not* filter provenance. Pin-verify the filter regardless.
+
+**Honest scope — read before using (§5.6 restates this for `SECURITY.md`).** A
+`PresenceCapability` is a **bearer token**, not a one-time token. Nothing in the
+token or the check binds it to a single use or a single holder: anyone in
+possession of the bytes can call `testWithCapability` any number of times, and
+can forward the token to anyone else, until `expiresAt`. What the token DOES
+guarantee is narrower than "one-time": it reveals **only this subject's own pool
+value** (`memberValue`, §5.1) — never the pool salt, and never any other
+member's value. The subject's signature is **consent** ("I allow testing of MY
+presence, until then"); it is **not** bearer-binding — it does not name or
+restrict who may hold or replay the token. A capability is also **not bound to
+a specific filter** beyond the free-form `serverId` string (§5.3) — see the
+`serverId` note there for the substitution consequence (informally "B11").
+`expiresAt` bounds only the `testWithCapability` wrapper, not the disclosed
+`memberValue` itself — see §5.4a for what that means in practice.
 
 ### 5.1 Token shape
 
 ```
-PresenceCapability = { serverId, subjectPubHex, saltHint, expiresAt, sig }
+PresenceCapability = { serverId, subjectPubHex, memberValue, expiresAt, sig }
 ```
+
+`memberValue` is the 64-hex value the subject is present in the pool **as**:
+
+```
+memberValue = memberKey(subjectPubHex, salt)     (keyed pool — salt supplied by the subject at issue time)
+memberValue = subjectPubHex                      (open pool — salt omitted at issue time)
+```
+
+The pool `salt`, if any, is supplied to `issuePresenceCapability` **only** to
+compute `memberValue`; it is discarded immediately after and **never** appears
+on the returned token, in the preimage, or anywhere reachable from it (this
+replaces the v1 `saltHint` field, which carried the raw salt — see §5.5, the B1
+audit fix). Holding a capability therefore lets a bearer test **only this one
+subject's** value; it grants no ability to compute or probe any other member's
+value, unlike v1.
 
 ### 5.2 Canonical signing bytes
 
 ```
-preimage = utf8( "tessera-cap:v1:" + serverId + ":" + subjectPubHex + ":" + saltHint + ":" + expiresAt )
+preimage = utf8( "tessera-cap:v2:" + serverId + ":" + subjectPubHex + ":" + memberValue + ":" + expiresAt )
 digest   = sha256(preimage)                            // 32 bytes, the Schnorr message
 sig      = hex( schnorr.sign(digest, subjectPriv) )    // 64-byte BIP340 compact sig, hex
 ```
 
+(Bumped `v1` → `v2` because the tuple's fields changed — §5.5.)
+
 - `subjectPubHex`: 64 lowercase hex (x-only). `issuePresenceCapability` asserts it
   equals the signing key's pubkey — you cannot issue for a key you don't control.
-- `saltHint`: even-length lowercase hex; **may be empty**. `saltHint = ''`
-  corresponds to an **open-pool** capability, i.e. the value tested is the **bare
-  open-pool form** `memberKey(subjectPubHex)` (the pubkey itself), **not**
-  `memberKey(subjectPubHex, '')` — see §5.4 and `SECURITY.md`.
-- `expiresAt`: finite number (unix seconds). Valid while `now ≤ expiresAt` (the
-  boundary instant is still valid).
+- `memberValue`: 64 lowercase hex, derived as in §5.1. Validated as 64-hex on
+  both issue and test.
+- `expiresAt`: **non-negative safe integer** (unix seconds). Valid while
+  `now ≤ expiresAt` (the boundary instant is still valid). A fractional, negative,
+  or too-large value can't be canonically reproduced across a JS/Rust/Go
+  verifier pair, so it is rejected rather than accepted and mis-stringified.
 - `sig`: 128 hex chars.
 
 ### 5.3 **`serverId` MUST be colon-free** (delimiter-injection guard)
 
 The canonical string is colon-delimited. Three of the four interpolated fields
-can never contain a colon (`subjectPubHex`/`saltHint` are hex; `expiresAt`
+can never contain a colon (`subjectPubHex`/`memberValue` are hex; `expiresAt`
 stringifies without `:`). Only `serverId` is free-form, so a `serverId`
 containing a colon is **rejected on both issue and test**. Without this guard a
 crafted `serverId` like `x:DEADBEEF:cafe:0` could shift field boundaries and make
@@ -323,18 +438,73 @@ two distinct tuples produce identical preimage bytes.
 > rejected**. Callers pass a **bare host** (`play.example.com`) or a **hash of
 > the URL** as the `serverId`.
 
+> **`serverId` is not cryptographically bound to any particular filter** — it is
+> whatever string the issuer and bearer agree it means, and nothing here
+> cross-checks it against a filter's signer or contents. A capability naming
+> server A's `serverId` will test true against **any** filter a bearer chooses to
+> run it against, if that filter happens to contain `memberValue` — including a
+> same-salt pool the subject never intended to expose. Pin-verify the filter
+> (§4) and choose actually-unique `serverId` values per deployment if that
+> distinction matters.
+
 ### 5.4 Test order (load-bearing)
 
-`testWithCapability(filter, cap, now?)` checks, in order: (1) field shapes; (2)
-**expiry** (`now > expiresAt` → throw `'capability expired'`); (3) **signature**
-(`schnorr.verify` against `subjectPubHex`, else throw
-`'capability signature invalid'`); (4) **only then** the membership test —
-`testMembership(filter, memberKey(subjectPubHex, saltHint))` for a non-empty
-`saltHint`, or the **bare open-pool form**
-`testMembership(filter, memberKey(subjectPubHex))` when `saltHint = ''` (§5.2). An
-expired/forged capability **throws** (a usage error) rather than returning a
-silent `false`, so a caller can never confuse "not present" with "this token is
-no good."
+`testWithCapability(filter, cap, now?)` checks, in order: (1) field shapes,
+including that the resolved clock value (`now ?? floor(Date.now()/1000)`) is
+`Number.isFinite` — a non-finite value throws rather than silently skipping the
+next check (§5.5); (2) **expiry** (`now > expiresAt` → throw
+`'capability expired'`); (3) **signature** (`schnorr.verify` against
+`subjectPubHex`, else throw `'capability signature invalid'`); (4) **only
+then** the membership test — `testMembership(filter, cap.memberValue)` directly;
+there is no salt to re-derive anything from at test time. An expired/forged
+capability **throws** (a usage error) rather than returning a silent `false`, so
+a caller can never confuse "not present" with "this token is no good."
+
+### 5.4a `expiresAt` only bounds the wrapper — it is not revocation of `memberValue`
+
+`expiresAt` gates `testWithCapability` (§5.4) — the convenience wrapper in this
+file — and nothing else. It does **not** bound `memberValue` itself. A bearer
+who has SEEN `memberValue` (from a validly-issued, unexpired capability, or
+disclosed any other way) can call `testMembership(filter, memberValue)`
+**directly**, bypassing `testWithCapability` and its expiry check entirely, for
+as long as `memberValue` remains a real value in the pool:
+
+- **Keyed pool:** that is every future epoch, until the pool's `salt` rotates —
+  rotation changes `memberKey(subjectPubHex, salt)`, and so changes
+  `memberValue` too, which is what actually revokes access.
+- **Open pool:** `memberValue` is the bare `subjectPubHex` and **never**
+  changes, so there is no rotation event at all — disclosure is effectively
+  permanent for that subject on that pool.
+
+**Salt rotation is the only real revocation mechanism.** `expiresAt` is a
+courtesy bound on the wrapper function's behaviour, not a cryptographic limit
+on how long a disclosed `memberValue` stays testable against the underlying
+filter.
+
+### 5.5 Audit fixes (v1 → v2)
+
+- **The salt is no longer carried (B1, HIGH).** v1's `saltHint` field WAS the
+  keyed pool's salt in clear: holding any one subject's capability handed the
+  bearer everything needed to compute `memberKey(anyPk, saltHint)` for **any**
+  candidate, defeating the keyed pool for that bearer entirely (and for anyone
+  they forwarded the token to). `memberValue` (§5.1) replaces it: it is only
+  this one subject's derived value and cannot be inverted back to the salt or
+  reused for any other subject.
+- **"One-time" language is removed.** The token was never actually one-time —
+  nothing enforced single use — and the docs now say so plainly (§ intro above).
+- **`expiresAt` is a non-negative safe integer**, not merely "a finite number"
+  (§5.2) — closes a cross-language canonicalisation gap (`1e21` stringified as
+  `"1e+21"` in JS, `1.5` was accepted).
+- **`testWithCapability` throws on a non-finite resolved clock** (§5.4) — before
+  the fix, an injected `now = NaN` made `NaN > expiresAt` evaluate to `false`,
+  silently skipping the expiry check and letting an already-expired capability
+  pass.
+
+### 5.6 See also
+
+`SECURITY.md` §6 restates the bearer-token / consent-not-provenance framing for
+the honest-privacy-posture reader; the `serverId`-is-not-filter-bound note above
+is sometimes referenced informally as "B11" in issue tracking.
 
 ---
 
@@ -366,14 +536,25 @@ caller-supplied `kind` + `tags` that reproduce kindred's publication are:
 | `kind` | `30444` |
 | `["d", …]` | `"kindred:members:<namespace>:<serverId>"` — `namespace` = the game/app (the aggregator unit), `serverId` = the instance |
 | `["n", "<namespace>"]` | indexable namespace tag, so an aggregator can `#n`-filter across many `serverId`s |
-| `["epoch", "<n>"]` | the filter epoch (unix seconds) — consumers reject `epoch ≤ last-seen` for a `(namespace, serverId)` |
+| `["epoch", "<n>"]` | the filter epoch (unix seconds), for HUMAN/INDEX convenience only |
 | `["keyed", "0" \| "1"]` | whether the pool is keyed |
 | `content` | **base64 of the raw `KFLT` blob** (produced by `buildFilterPublication`) |
+
+**Freshness — do NOT trust the `["epoch"]` tag for rollback protection.** The tag
+is signed only by the Nostr publisher key (standard NIP-01), never by the
+pinned blob-signing key (§4), and this kit never cross-checks it against the
+blob's own SIGNED `epoch` (KFLT header offset 8, §3). A relay or a malicious
+publisher can attach any tag value to any event, including a fresh tag on a
+replayed, older blob. Consumers **MUST** decode `content`, call
+`verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch })` (§4.3), and use the
+returned `filter.epoch` — the blob's own signed epoch — for the
+`epoch ≤ last-seen` freshness check per `(namespace, serverId)`, never the tag.
 
 The event itself is signed by the publisher's Nostr key (standard NIP-01); that
 is **separate** from the in-blob Schnorr provenance signature (§4). A consumer
 verifies **both**: the event signature (transport integrity) **and**
-`verifyFilterBlob` against the pinned server key (filter provenance). The
+`verifyFilterBlob` (or, preferably, `verifyAndParseFilter`) against the pinned
+server key (filter provenance). The
 `30444` kind is the dedicated addressable kind for filter publications (it
 supersedes the `30078` placeholder used during early design — `30078` is
 signet-app's contact-sync kind and is reused here only as a historical note, not
@@ -434,5 +615,6 @@ though only 16 is implemented in v1.
 | `SEGMENT_LENGTH_CAP` | `1 << 18` (262144) |
 | seed start | `0x66666b6c` |
 | seed Weyl step | `0x9e3779b9` |
-| capability prefix | `"tessera-cap:v1:"` |
+| capability prefix | `"tessera-cap:v2:"` |
+| decoy epoch-rekey prefix | `"tessera-decoy:v1:"` |
 | publication kind | `30444` |

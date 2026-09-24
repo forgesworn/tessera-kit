@@ -8,20 +8,42 @@
 //   `_memberCountBand` still records the TRUE count's bucket — that coarse count
 //   "leaks by design" (spec §7.5); padding hides only the fine count.
 //
-// DECOY STABILITY (the load-bearing privacy property):
-//   Decoys MUST be STABLE across rebuilds within the same context+bucket. If the
-//   decoy set changes every epoch, an attacker who collects two published blobs
-//   can diff their array contents: the keys that stay are decoys, the keys that
-//   churn are real members joining/leaving. A STABLE decoy set (derived from a
-//   fixed `decoySeedHex`) defeats this version-diffing attack — the padding bytes
-//   are identical across rebuilds, so only genuine membership changes show up.
+// DECOY STABILITY IS A DOUBLE-EDGED PROPERTY (audit fix — read before choosing):
+//   Fuse fingerprint slots are XOR-SHARED across every inserted key (member AND
+//   decoy alike) — no slot "belongs" to one key. That means a FIXED decoy set,
+//   reused byte-for-byte across epochs, does NOT hide churn the way a per-key
+//   mental model would suggest. Measured on a 700-member pool at bucket 1024: a
+//   STABLE seed with 0 membership changes between epochs diffs at exactly **0**
+//   fingerprint slots, and with exactly 1 member swapped diffs at only **~3**
+//   slots (≥2 swaps diffs ~1000). A non-salt-holder who diffs two published blobs
+//   therefore learns, with high confidence, whether membership changed at all —
+//   and whether it was a single swap — purely from array-diff magnitude, with
+//   NO per-key attribution needed. That is a real activity-leak, not a false
+//   alarm: a perfectly stable decoy set makes the WHOLE array a version-diffing
+//   oracle for churn events, even though no individual decoy is ever identified.
 //
-//   tessera-kit has no notion of a serverId, so it cannot derive the seed itself.
-//   The caller supplies `decoySeedHex` (e.g. a per-server secret). Padding WITHOUT
-//   a seed is allowed (CSPRNG-random decoys) but is the UNSTABLE case: an attacker
-//   CAN track churn by diffing array contents across epochs. This module never
-//   logs and never throws on the unstable path — the instability is a documented
-//   trade-off the caller opts into by omitting the seed.
+//   What actually defeats this: EITHER unstable decoys (CSPRNG-random, this
+//   module's default when no seed is given — every rebuild picks new decoys, so
+//   diff magnitude carries no signal), OR decoys that are stable WITHIN an epoch
+//   but change ACROSS epochs (what `buildMembershipFilter` now does by deriving
+//   a fresh effective seed from `(decoySeedHex, epoch)` before calling
+//   `padMembersToBucket` here — see `filter.ts`). Either option keeps a REBUILD
+//   of the same unchanged epoch byte-identical (useful for caching, and required
+//   by the golden-vector contract) while denying an attacker a fixed baseline to
+//   diff two DIFFERENT epochs against.
+//
+//   DEGENERATE CASE: when the true member count already equals the bucket size
+//   (`n == band`), `padMembersToBucket` adds ZERO decoys (see `need <= 0` below)
+//   — there is nothing to pad. In that case the fingerprint array diffs EXACTLY
+//   regardless of decoy mode: every slot change is a genuine membership change,
+//   because there are no decoys in the mix to begin with.
+//
+//   This module itself is unchanged by the fix — `deriveDecoys` and
+//   `padMembersToBucket` still do exactly what they did before. What changed is
+//   WHICH seed `buildMembershipFilter` passes in (per-epoch, not the caller's raw
+//   `decoySeedHex`). A caller invoking this module directly still gets the raw,
+//   epoch-unaware behaviour documented here — the epoch-rekeying is applied one
+//   layer up.
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, concatBytes, randomBytes } from '@noble/hashes/utils.js'

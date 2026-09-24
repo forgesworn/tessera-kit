@@ -25,6 +25,7 @@
 // provenance signature (`signFilterBlob`). No console output.
 
 import { base64 } from '@scure/base'
+import { KFLT_MAX_BLOB_BYTES } from './types.js'
 
 /**
  * Minimal Nostr event-template type (structural — no `nostr-tools` runtime dep).
@@ -38,11 +39,13 @@ export interface EventTemplate {
   created_at: number
 }
 
-/** Hard cap on decoded blob size, mirroring `KFLT_MAX_BLOB_BYTES` (64 MiB, spec
- *  §7.3). `decodeFilterPublicationContent` rejects content whose decoded length
- *  would exceed this BEFORE handing the bytes on, so a hostile oversized event
- *  can't drive an unbounded allocation downstream. */
-const DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+/** Default (and absolute ceiling on) decoded blob size: the actual
+ *  `KFLT_MAX_BLOB_BYTES` constant (64 MiB, spec §7.3), imported rather than
+ *  re-declared so the two can never drift apart. `decodeFilterPublicationContent`
+ *  rejects content whose decoded length would exceed the (clamped) cap BEFORE
+ *  handing the bytes on, so a hostile oversized event can't drive an unbounded
+ *  allocation downstream. */
+const DEFAULT_MAX_BYTES = KFLT_MAX_BLOB_BYTES
 
 /**
  * Generic filter-publication builder: base64-encodes the raw KFLT `blob` into the
@@ -79,10 +82,17 @@ export function buildFilterPublication(p: {
  * the rest of the kit uses against hostile input.
  *
  * @param content the base64 event content produced by `buildFilterPublication`.
- * @param maxBytes max permitted DECODED length (defaults to 64 MiB, the KFLT cap).
+ * @param maxBytes max permitted DECODED length (defaults to `KFLT_MAX_BLOB_BYTES`,
+ *                 64 MiB). MUST be a non-negative safe integer; a caller-supplied
+ *                 value above `KFLT_MAX_BLOB_BYTES` is silently CLAMPED to it
+ *                 (audit fix — a hostile/careless `NaN` or negative `maxBytes`
+ *                 previously disabled the size cap entirely: the pre-check
+ *                 `content.length > maxEncodedLen` is vacuously false for
+ *                 `NaN`/negative bounds).
  * @returns the decoded blob bytes.
- * @throws if the base64 string is too long for `maxBytes`, if it is malformed
- *         base64, or if the decoded length somehow still exceeds `maxBytes`.
+ * @throws if `maxBytes` is not a non-negative safe integer, if the base64 string
+ *         is too long for the (clamped) `maxBytes`, if it is malformed base64, or
+ *         if the decoded length somehow still exceeds the (clamped) `maxBytes`.
  */
 export function decodeFilterPublicationContent(
   content: string,
@@ -91,23 +101,33 @@ export function decodeFilterPublicationContent(
   if (typeof content !== 'string') {
     throw new Error('decodeFilterPublicationContent: content must be a string')
   }
+  // `maxBytes` must itself be well-formed BEFORE it's used to bound anything —
+  // a NaN/negative/non-integer value must never silently disable the cap below
+  // (audit fix; see the doc comment above).
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error('decodeFilterPublicationContent: maxBytes must be a non-negative safe integer')
+  }
+  // Clamp to the hard KFLT ceiling regardless of what the caller passed — no
+  // caller-supplied value can raise the cap above the format's own maximum.
+  const clampedMaxBytes = Math.min(maxBytes, KFLT_MAX_BLOB_BYTES)
+
   // Upper-bound the decoded size from the ENCODED length before decoding. Standard
   // base64 encodes 3 bytes -> 4 chars (with '=' padding), so the maximum decodable
-  // byte count is ceil(maxBytes / 3) * 4 characters. Reject anything longer so a
-  // hostile event can't force a large allocation in `base64.decode`.
-  const maxEncodedLen = Math.ceil(maxBytes / 3) * 4
+  // byte count is ceil(clampedMaxBytes / 3) * 4 characters. Reject anything longer
+  // so a hostile event can't force a large allocation in `base64.decode`.
+  const maxEncodedLen = Math.ceil(clampedMaxBytes / 3) * 4
   if (content.length > maxEncodedLen) {
     throw new Error(
-      `decodeFilterPublicationContent: content exceeds max decoded size (${maxBytes} bytes)`,
+      `decodeFilterPublicationContent: content exceeds max decoded size (${clampedMaxBytes} bytes)`,
     )
   }
 
   const bytes = base64.decode(content) // throws on malformed base64
   // Defence in depth: the length pre-check is an upper bound; assert the actual
   // decoded length too (covers any padding/edge slack).
-  if (bytes.length > maxBytes) {
+  if (bytes.length > clampedMaxBytes) {
     throw new Error(
-      `decodeFilterPublicationContent: decoded ${bytes.length} bytes exceeds max ${maxBytes}`,
+      `decodeFilterPublicationContent: decoded ${bytes.length} bytes exceeds max ${clampedMaxBytes}`,
     )
   }
   return bytes

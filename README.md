@@ -70,21 +70,21 @@ signFilterBlob(blob, serverPrivHex) // mutates `blob`: writes signer pubkey + si
 // (see PROTOCOL.md "Server publication shape" for the zero-dependency tag layout).
 ```
 
-### Client — parse, **verify against a pinned key**, then test
+### Client — parse, **verify against a pinned key**, check freshness, then test
 
 ```typescript
-import { parseFilter, verifyFilterBlob, testMembership, memberKey } from '@forgesworn/tessera-kit'
+import { verifyAndParseFilter, testMembership, memberKey } from '@forgesworn/tessera-kit'
 
-// `parseFilter` validates the blob is SELF-CONSISTENT bytes. It does NOT
-// authenticate origin — never trust a hit on parse alone.
-const filter = parseFilter(blob)
-
-// Provenance gate. `ok:true` means only "internally-consistent sig by
-// signerPubkeyHex." Trust comes from the PINNED-key comparison, not from `ok`.
-const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
-if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) {
-  throw new Error('untrusted filter — refuse to test')
-}
+// One call does the mandatory work: pin-verify the signer, parse, and (if you
+// pass minEpoch) reject a stale/rolled-back blob. Track the highest epoch
+// you've accepted per pinned key and pass it back in next time.
+const filter = verifyAndParseFilter(blob, {
+  pinnedPubkeyHex: PINNED_SERVER_PUBKEY,
+  minEpoch: lastSeenEpoch, // optional; omit on first fetch
+})
+// filter.epoch is the blob's own SIGNED epoch — use THIS for freshness, never a
+// Nostr ["epoch"] tag on a wrapping event (that tag is signed only by the
+// publisher key and is never cross-checked against the blob; see PROTOCOL.md §4.3/§6).
 
 // Now a local membership test. Transform the query the SAME way the pool was
 // built: memberKey(friendPk) for an open pool, memberKey(friendPk, salt) keyed.
@@ -94,23 +94,46 @@ const present = testMembership(filter, memberKey(friendPubkey))
 // (a key-control challenge) before acting on a hit.
 ```
 
-### Locating a consenting friend on a *keyed* server — capability tokens
+> A `KFLT` blob does not name the server/namespace it belongs to — the pinned
+> key is the only binding a consumer has. If you reuse one signing key across
+> several servers or namespaces, a relay/MITM can substitute one server's
+> validly-signed blob for another's and `verifyAndParseFilter` cannot tell.
+> Use a **distinct signing key per server/namespace** if that matters to you.
 
-A friend can hand you a one-time, expiring token to test **their** presence on a
-keyed server without the server going open and without you being able to forge a
-token for anyone else. The token is signed by the **subject** (consent), not the
-server (provenance) — still pin-verify the filter.
+(`parseFilter` / `verifyFilterBlob` are still exported separately if you need
+them independently — `verifyAndParseFilter` is the recommended combined path.)
+
+### Locating a consenting friend on a server — capability tokens
+
+A friend can hand you an expiring **bearer** token to test **their** presence on
+a server without a keyed pool going open to you and without you being able to
+forge a token for anyone else. The token is signed by the **subject** (consent),
+not the server (provenance) — still pin-verify the filter.
+
+> **Honest scope:** this is a bearer token, not a one-time token — anyone who
+> holds it can test it, any number of times, and can forward it to anyone else,
+> until `expiresAt`. What it DOES guarantee: it reveals only **this subject's**
+> own pool value, never the pool salt — holding one friend's capability grants
+> no ability to probe any other member. It is also not bound to a specific
+> filter beyond the free-form `serverId` string. **`expiresAt` only bounds the
+> `testWithCapability` check** — a bearer who has already seen the subject's pool
+> value can test it directly, every epoch, until the pool's salt rotates (or
+> indefinitely, for an open pool). Salt rotation is the real revocation. See
+> SECURITY.md §6 / PROTOCOL.md §5.
 
 ```typescript
 import { issuePresenceCapability, testWithCapability } from '@forgesworn/tessera-kit/capability'
 
-// Subject (the friend) issues a capability for a colon-free serverId.
+// Subject (the friend) issues a capability for a colon-free serverId. `salt` is
+// the KEYED pool's salt — pass it for a keyed server, omit it for an open one.
+// The salt itself never ends up on the returned capability; only the subject's
+// own derived `memberValue` does.
 const cap = issuePresenceCapability(
-  { serverId: 'play.example.com', subjectPubHex, saltHint: salt, expiresAt },
+  { serverId: 'play.example.com', subjectPubHex, salt, expiresAt },
   subjectPrivHex,
 )
 
-// Bearer tests it. Signature + expiry are checked BEFORE the membership test;
+// Bearer tests it. Expiry + signature are checked BEFORE the membership test;
 // an expired/forged capability THROWS (it is not a silent `false`).
 const friendPresent = testWithCapability(keyedFilter, cap)
 ```
@@ -122,14 +145,15 @@ const friendPresent = testWithCapability(keyedFilter, cap)
 | Export | Purpose |
 |--------|---------|
 | `memberKey(pubkeyHex, saltHex?)` | The value to insert/test: the pubkey (open) or `sha256(salt ‖ pubkey)` (keyed). |
-| `buildMembershipFilter(valuesHex, opts)` | Build a Binary Fuse 16 filter over already-`memberKey`-transformed values. `opts.epoch` required; `fingerprintBits` defaults to 16; `padToBucket` defaults to true; `salt` presence sets the keyed flag; `decoySeedHex` for stable padding. |
+| `buildMembershipFilter(valuesHex, opts)` | Build a Binary Fuse 16 filter over already-`memberKey`-transformed values. `opts.epoch` required; `fingerprintBits` defaults to 16; `padToBucket` defaults to true; `salt` presence sets the keyed flag; `decoySeedHex` for decoys that are stable within an epoch but re-keyed per epoch (defeats cross-epoch diffing — see SECURITY.md §4). |
 | `testMembership(filter, valueHex)` | Local membership test. No false negatives; false positives ≈ 2⁻¹⁶. |
 | `serializeFilter(filter)` | Encode to the `KFLT` blob (signer/sig regions left zero). |
 | `parseFilter(blob)` | Hardened decode — validates magic/version/geometry and recomputes length **before** allocating. Self-consistency only; **not** provenance. |
 | `signFilterBlob(blob, signerPrivHex)` | Sign the blob **in place** (writes signer pubkey + Schnorr sig). Zeroizes the priv byte copy. |
 | `verifyFilterBlob(blob)` | `{ signerPubkeyHex, ok }`. Never throws on hostile input. **Compare `signerPubkeyHex` to a pinned key before trusting a hit.** |
+| `verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? })` | The recommended combined path: pin-verifies, parses, and (if `minEpoch` given) rejects a stale/rolled-back filter. Throws on any failure. |
 | `nextPowerOfTwoBand(n)` | Size-bucket function (the `member_count_band`). |
-| `deriveDecoys(decoySeedHex, count)` | Deterministic decoy keys for stable padding. |
+| `deriveDecoys(decoySeedHex, count)` | Deterministic decoy keys for a given `(decoySeedHex, count)`. `buildMembershipFilter` calls this with an epoch-derived seed, not the caller's raw `decoySeedHex` — see SECURITY.md §4. |
 
 Types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, and the `KFLT_*` constants.
 
@@ -137,9 +161,9 @@ Types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`
 
 | Export | Purpose |
 |--------|---------|
-| `issuePresenceCapability(p, subjectPrivHex)` | Subject mints a consent token to be located on a keyed server. Asserts the embedded `subjectPubHex` matches the signing key. |
-| `testWithCapability(filter, cap, now?)` | Verify the token (sig + expiry first) then test the subject. Throws on expired/forged. |
-| Type: `PresenceCapability` | `{ serverId, subjectPubHex, saltHint, expiresAt, sig }`. `serverId` **must be colon-free**. |
+| `issuePresenceCapability(p, subjectPrivHex)` | Subject mints a **bearer** consent token to be located. `p.salt` (optional; a keyed pool's salt, omit for open) is used only to derive `memberValue` and is never stored on the returned token. Asserts the embedded `subjectPubHex` matches the signing key. |
+| `testWithCapability(filter, cap, now?)` | Verify the token (expiry + sig first, in that order) then test `cap.memberValue` directly. Throws on expired/forged/malformed. |
+| Type: `PresenceCapability` | `{ serverId, subjectPubHex, memberValue, expiresAt, sig }`. `serverId` **must be colon-free** and is not cryptographically bound to any filter. `memberValue` is the subject's own 64-hex pool value — never the pool salt. |
 
 The exact byte layouts (KFLT header, signing digest, capability canonical bytes,
 and the Nostr publication tag shape) are in **[PROTOCOL.md](./PROTOCOL.md)**.
@@ -154,6 +178,7 @@ tessera-kit makes **narrow, honest** privacy claims. Before you build on it, rea
 - **Pin-verify is mandatory.** Always check `signerPubkeyHex` against a known server key before trusting a hit — a forged filter is a doxxing primitive.
 - **`member_count_band` leaks a coarse power-of-two count by design;** padding hides only the fine count.
 - **Salt rotation defeats array-diffing by non-holders** but a party holding candidate key X can still track X across epochs by re-testing.
+- **A capability is a bearer token, not a one-time token,** and reveals only its subject's own pool value, never the pool salt. `expiresAt` bounds only the `testWithCapability` check, not the disclosed value — salt rotation is the actual revocation.
 
 ## Toolkit
 

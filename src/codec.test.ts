@@ -192,6 +192,61 @@ describe('parseFilter — hardening (each check throws on a corrupted copy)', ()
     const parsed = parseFilter(serializeFilter(f))
     expect(parsed.type).toBe(1)
   })
+
+  // B7 (audit fix) — parseFilter rejects a u64 epoch above Number.MAX_SAFE_INTEGER
+  // rather than silently losing precision in the BigInt→Number conversion.
+  it('throws when the header epoch exceeds Number.MAX_SAFE_INTEGER', () => {
+    const b = good.slice()
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+    dv.setBigUint64(8, BigInt(Number.MAX_SAFE_INTEGER) + 2n, true)
+    expect(() => parseFilter(b)).toThrow(/epoch/)
+  })
+
+  it('still accepts an epoch exactly at Number.MAX_SAFE_INTEGER', () => {
+    const b = good.slice()
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+    dv.setBigUint64(8, BigInt(Number.MAX_SAFE_INTEGER), true)
+    const parsed = parseFilter(b)
+    expect(parsed.epoch).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  // B9 (audit fix) — reserved flag bits 2-7 must be zero; `serializeFilter` never
+  // sets them, so a blob that does is non-canonical input.
+  it('throws when a reserved flag bit (2-7) is set', () => {
+    const b = good.slice()
+    b[7] = (b[7] as number) | 0x04 // bit 2, reserved
+    expect(() => parseFilter(b)).toThrow(/flag/i)
+  })
+
+  it('still accepts flags with only bit0 (keyed) and/or bit1 (padded) set', () => {
+    const b = good.slice()
+    b[7] = 0x03 // keyed + padded, no reserved bits
+    expect(() => parseFilter(b)).not.toThrow()
+  })
+
+  // B9 (audit fix) — member_count_band must be a power of two: `serializeFilter`
+  // always writes `nextPowerOfTwoBand(trueCount)`, which is always a power of two
+  // >= 1 regardless of `padToBucket`, so any other value is non-canonical input.
+  it('throws when member_count_band is not a power of two', () => {
+    const b = good.slice()
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+    dv.setUint32(28, 5, true) // 5 is not a power of two
+    expect(() => parseFilter(b)).toThrow(/member_count_band/)
+  })
+
+  it('throws when member_count_band is 0', () => {
+    const b = good.slice()
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+    dv.setUint32(28, 0, true)
+    expect(() => parseFilter(b)).toThrow(/member_count_band/)
+  })
+
+  it('still accepts a power-of-two member_count_band (e.g. 64)', () => {
+    const b = good.slice()
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+    dv.setUint32(28, 64, true)
+    expect(() => parseFilter(b)).not.toThrow()
+  })
 })
 
 // ---- Deterministic counter-based PRNG (xorshift32) — no Math.random flakiness.

@@ -21,12 +21,17 @@ export interface FilterBuildOptions {
   fingerprintBits?: FingerprintBits            // default 16
   salt?: string                                // hex; presence ⇒ keyed=true
   padToBucket?: boolean                        // default true
-  /** Even-length hex seed for STABLE decoy padding (spec §7.5). When set, the
-   *  decoys added to reach the size bucket are deterministic across rebuilds, so
-   *  version-diffing can't track real churn. When OMITTED, padding still happens
-   *  but with CSPRNG-random decoys — an attacker can then track churn by diffing
-   *  array contents across epochs (the documented "unstable" case). Additive in
-   *  TK-6; pre-TK-6 callers that don't pass it get the unstable-but-padded path. */
+  /** Even-length hex seed, MUST be at least 16 bytes (32 hex chars), for
+   *  STABLE-PER-EPOCH decoy padding (spec §7.5). When set, `buildMembershipFilter`
+   *  derives a fresh effective seed from `(decoySeedHex, epoch)` before padding
+   *  (see `filter.ts`'s `deriveEpochDecoySeedHex`): a REBUILD of the SAME epoch
+   *  with the SAME seed is byte-identical, but each NEW epoch gets a fresh decoy
+   *  set. This is what defeats cross-epoch churn-diffing — a FIXED decoy set
+   *  reused across epochs does not (see `padding.ts`'s module note: fuse slots
+   *  are XOR-shared, so a stable-forever decoy set makes the array diff exactly
+   *  0 slots when nothing changed and ~3 when one member swapped). When OMITTED,
+   *  padding still happens but with CSPRNG-random decoys, unstable even within an
+   *  epoch. Throws if the seed is malformed or shorter than 16 bytes. */
   decoySeedHex?: string
   epoch: number                                // unix seconds, REQUIRED
 }

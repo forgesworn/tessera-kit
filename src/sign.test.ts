@@ -5,7 +5,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { buildMembershipFilter, testMembership } from './filter.js'
 import { memberKey } from './member-key.js'
 import { serializeFilter, parseFilter } from './codec.js'
-import { signFilterBlob, verifyFilterBlob } from './sign.js'
+import { signFilterBlob, verifyFilterBlob, verifyAndParseFilter } from './sign.js'
 import type { MembershipFilter } from './types.js'
 
 // Deterministic distinct 64-hex pubkeys (same style as codec.test.ts).
@@ -210,5 +210,125 @@ describe('verifyFilterBlob — malformed input does not throw', () => {
     for (let i = 0; i < b.length; i++) b[i] = (i * 73 + 11) & 0xff
     expect(() => verifyFilterBlob(b)).not.toThrow()
     expect(verifyFilterBlob(b).ok).toBe(false)
+  })
+})
+
+// B4 (audit fix) — verifyAndParseFilter: the combined pin-verify + parse +
+// freshness helper. Makes the mandatory pin check and the (new) minEpoch
+// freshness check the only path, closing the "forgot to pin" and "no rollback
+// check" gaps left by using verifyFilterBlob/parseFilter separately.
+describe('verifyAndParseFilter (B4 audit fix)', () => {
+  it('returns the parsed filter when the blob is validly signed by the pinned key', () => {
+    const { blob, memberKeys } = signedBlob(30, 90)
+    const filter = verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex })
+    for (const k of memberKeys) expect(testMembership(filter, k)).toBe(true)
+    expect(filter.epoch).toBe(EPOCH)
+  })
+
+  it('accepts the pinned key case-insensitively', () => {
+    const { blob } = signedBlob(10, 91)
+    expect(() =>
+      verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex.toUpperCase() }),
+    ).not.toThrow()
+  })
+
+  it('throws when the signer does not match the pinned key (cross-server substitution)', () => {
+    const { blob } = signedBlob(10, 92)
+    const OTHER = keypairFromSeed(0x33)
+    expect(() =>
+      verifyAndParseFilter(blob, { pinnedPubkeyHex: OTHER.pubHex }),
+    ).toThrow()
+  })
+
+  it('throws when the signature is internally invalid (tampered blob)', () => {
+    const { blob } = signedBlob(10, 93)
+    blob[100] ^= 0xff // inside the sig region
+    expect(() =>
+      verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex }),
+    ).toThrow()
+  })
+
+  it('throws on a too-short blob (fails the pin check — ok:false — before parseFilter is ever reached)', () => {
+    // A too-short blob fails verifyFilterBlob first (signerPubkeyHex: '', ok:false),
+    // so this exercises the PIN-CHECK failure path, not the parse-failure path —
+    // see the next test for a blob that passes the pin check and fails at parse.
+    expect(() =>
+      verifyAndParseFilter(new Uint8Array(10), { pinnedPubkeyHex: SERVER.pubHex }),
+    ).toThrow('signature invalid or signer does not match')
+  })
+
+  it('throws on a CORRECTLY-SIGNED blob with a reserved flag bit set (passes the pin check, fails at parseFilter)', () => {
+    // Set the reserved bit BEFORE signing, so the signature covers it and the
+    // blob is internally consistent — verifyFilterBlob/the pin check PASS. The
+    // failure must come from parseFilter's structural validation (B9), reached
+    // only after the pin check succeeds.
+    const { f } = openFilter(12, 96)
+    const unsigned = serializeFilter(f)
+    unsigned[7] = (unsigned[7] as number) | 0x04 // bit 2, reserved
+    const blob = signFilterBlob(unsigned, SERVER.privHex)
+    expect(verifyFilterBlob(blob).ok).toBe(true) // sanity: pin check would pass
+    expect(() =>
+      verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex }),
+    ).toThrow(/reserved flag/i)
+  })
+
+  it('throws on a CORRECTLY-SIGNED blob with a non-power-of-two member_count_band (passes the pin check, fails at parseFilter)', () => {
+    const { f } = openFilter(12, 97)
+    const unsigned = serializeFilter(f)
+    new DataView(unsigned.buffer, unsigned.byteOffset, unsigned.byteLength).setUint32(28, 5, true)
+    const blob = signFilterBlob(unsigned, SERVER.privHex)
+    expect(verifyFilterBlob(blob).ok).toBe(true) // sanity: pin check would pass
+    expect(() =>
+      verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex }),
+    ).toThrow(/member_count_band/)
+  })
+
+  it('accepts a filter whose epoch is >= minEpoch', () => {
+    const { blob } = signedBlob(10, 94)
+    const filter = verifyAndParseFilter(blob, {
+      pinnedPubkeyHex: SERVER.pubHex,
+      minEpoch: EPOCH,
+    })
+    expect(filter.epoch).toBe(EPOCH)
+  })
+
+  it('throws on a stale/rolled-back filter whose epoch is < minEpoch', () => {
+    const { blob } = signedBlob(10, 95)
+    expect(() =>
+      verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex, minEpoch: EPOCH + 1 }),
+    ).toThrow(/stale|rollback/)
+  })
+
+  // Review follow-up — verifyAndParseFilter input validation (opts themselves).
+  describe('opts validation', () => {
+    it('throws on a non-64-hex pinnedPubkeyHex', () => {
+      const { blob } = signedBlob(10, 98)
+      expect(() => verifyAndParseFilter(blob, { pinnedPubkeyHex: 'abc' })).toThrow(
+        'pinnedPubkeyHex must be 64 hex chars',
+      )
+    })
+
+    it('throws on a NaN minEpoch instead of silently accepting a stale blob (audit fix)', () => {
+      // Before the fix, `filter.epoch < NaN` is always false, so a NaN minEpoch
+      // would accept ANY epoch — the same footgun as B5's NaN capability clock.
+      const { blob } = signedBlob(10, 99)
+      expect(() =>
+        verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex, minEpoch: Number.NaN }),
+      ).toThrow('minEpoch must be a non-negative safe integer')
+    })
+
+    it('throws on a negative minEpoch', () => {
+      const { blob } = signedBlob(10, 100)
+      expect(() =>
+        verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex, minEpoch: -1 }),
+      ).toThrow('minEpoch must be a non-negative safe integer')
+    })
+
+    it('throws on a fractional minEpoch', () => {
+      const { blob } = signedBlob(10, 101)
+      expect(() =>
+        verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex, minEpoch: 1.5 }),
+      ).toThrow('minEpoch must be a non-negative safe integer')
+    })
   })
 })

@@ -1,23 +1,25 @@
 {
-  "description": "KFLT v1 frozen golden vector for @forgesworn/tessera-kit. UNSIGNED serializeFilter output (signer[32,64) + sig[64,128) regions are zero — Schnorr signing is non-deterministic and has its own tests). Determinism via padToBucket:false (no random decoys). Cross-impl / future-Rust-port contract: rebuilding the Binary Fuse 16 filter from memberKeysHex + opts and serializing MUST reproduce serializedBlobHex byte-for-byte, and the membership results MUST match. NOTE: memberKeysHex INTENTIONALLY includes two 66-char (33-byte) keys — the build/serialize layer hashes arbitrary-length hex (buildMembershipFilter has no length guard), and they are part of the frozen serialization. membership.present/absent are restricted to 64-hex values because testMembership() validates 64-hex at its public boundary; the two non-64-hex members are still IN the filter (and in serializedBlobHex), they are simply not probed via the now-hardened testMembership API.",
+  "description": "KFLT v1 frozen golden vector for @forgesworn/tessera-kit. UNSIGNED serializeFilter output (signer[32,64) + sig[64,128) regions are zero — Schnorr signing is non-deterministic and has its own tests). Determinism via padToBucket:false (no random decoys). Cross-impl / future-Rust-port contract: rebuilding the Binary Fuse 16 filter from memberKeysHex + opts and serializing MUST reproduce serializedBlobHex byte-for-byte, and the membership results MUST match. All memberKeysHex entries are exactly 64 lowercase hex chars (32 bytes) — buildMembershipFilter validates every input key against /^[0-9a-f]{64}$/i and throws (naming the offending index) on anything else, so a non-64-hex key can no longer appear in a filter at all (audit fix; the earlier version of this vector intentionally froze two 66-char keys before that validation existed).",
   "memberKeysHex": [
     "1111111111111111111111111111111111111111111111111111111111111111",
     "2222222222222222222222222222222222222222222222222222222222222222",
     "3333333333333333333333333333333333333333333333333333333333333333",
-    "abababababababababababababababababababababababababababababababab01",
-    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef00"
+    "abababababababababababababababababababababababababababababababab",
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   ],
   "opts": {
     "fingerprintBits": 16,
     "epoch": 1700000000,
     "padToBucket": false
   },
-  "serializedBlobHex": "4b464c540101100000f15365000000006c6b6666080000000100000008000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002c2200000000000000000000aecb00000000835a0000d0cc0000b16a00000000",
+  "serializedBlobHex": "4b464c540101100000f15365000000006c6b666608000000010000000800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000da3b000000003feb000000000000c9f2000000000000000000000000193e0000a2a300000000",
   "membership": {
     "present": [
       "1111111111111111111111111111111111111111111111111111111111111111",
       "2222222222222222222222222222222222222222222222222222222222222222",
-      "3333333333333333333333333333333333333333333333333333333333333333"
+      "3333333333333333333333333333333333333333333333333333333333333333",
+      "abababababababababababababababababababababababababababababababab",
+      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     ],
     "absent": [
       "0000000000000000000000000000000000000000000000000000000000000000",

@@ -4,11 +4,129 @@ All notable changes to `@forgesworn/tessera-kit` are documented here. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — Unreleased
+## [0.2.0] — 2026-09-24
 
-A post-audit hardening pass over 0.1.0, followed by a second review pass that
-closed gaps the first missed. Several fixes are **breaking** — 0.1.0 was never
-published, so this is the first shape consumers actually build against.
+A post-audit hardening pass over 0.1.0, a second review pass that closed gaps
+the first missed, and a third pre-publish pass (below) that closes the
+remaining gaps found before first release. Several fixes are **breaking** —
+0.1.0 was never published, so this is the first shape consumers actually
+build against.
+
+**Summary.** This release binds the signed-blob digest to a caller-supplied
+`context`, closing cross-server/namespace filter substitution
+cryptographically (previously only distinct signing keys defended against
+it) — `isValidFilterContext(ctx)` is now exported (from `.` and `sign.ts`) as
+the one reusable predicate for "is this a valid `context`," used internally
+by `signFilterBlob`/`verifyFilterBlob` themselves. Every thrown error is now
+a `TesseraError` with a stable `code`. `FilterType`/`FingerprintBits` are
+narrowed to the values actually implemented (`1`/`16`); the wire format still
+reserves the rest. Conformance vectors now cover realistic/boundary sizes
+(see `CONFORMANCE.md`), and docs are consistent on kindred (the convention)
+vs. kenspeckle (the code).
+
+**Breaking, this round:**
+- `signFilterBlob`/`verifyFilterBlob`/`verifyAndParseFilter` require `context`
+  — the digest formula changed; old signed blobs won't verify.
+- Every throw is a `TesseraError`, not a bare `Error` (messages unchanged).
+- `FilterType`/`FingerprintBits` narrowed to `1`/`16` (reserved values stay
+  documented + rejected at runtime; only the exported TYPE changed).
+
+### Third pass — pre-publish hardening
+
+#### Breaking
+
+- **Signature-context binding (§4.1/§4.3).** The signed digest is now
+  `sha256("tessera-kflt-sig:v1" ‖ 0x00 ‖ u32be(byteLen(ctx)) ‖ utf8(ctx) ‖
+  blob[0..64) ‖ sha256(blob[128..end)))` — a fixed domain tag and a
+  length-prefixed, caller-supplied `context` string, byte-exact with no
+  Unicode normalisation (reusing the lone-surrogate check `capability.ts`'s
+  `serverId` already used, now shared via `src/text.ts`). `context` is
+  REQUIRED, non-empty, well-formed UTF-16, and ≤1024 UTF-8 bytes.
+  **Why:** before this fix, `pinnedPubkeyHex` alone was the only binding a
+  verifier had; reusing one signing key across servers/namespaces let a
+  relay/MITM substitute one deployment's validly-signed blob for another's,
+  invisibly. `context` (the verifier's own stable, out-of-band-known
+  deployment address — e.g. a kindred d-tag
+  `kindred:members:<namespace>:<serverId>`) closes this cryptographically.
+  **A wrong context fails with the exact same generic error as a wrong
+  signer** (`VERIFY_SIGNATURE_OR_SIGNER_MISMATCH` / "signature invalid or
+  signer does not match") — never a distinguishable message or code.
+  A distinct signing key per server is now defence in depth, not the only
+  mitigation. **Migrate:** pass `context` everywhere these three functions
+  are called; re-sign every stored blob.
+- **`FilterType` narrowed to `1`; `FingerprintBits` narrowed to `16`.** These
+  exported types previously advertised `1|2|3` and `8|16|20|32` — values the
+  code has always rejected at runtime. The wire format still reserves those
+  values (PROTOCOL.md §3), and `parseFilter` still rejects them with their
+  own `TesseraErrorCode`s; only the TYPE, not the runtime behaviour, changed.
+  **Migrate:** if you constructed a `FilterBuildOptions`/`MembershipFilter`
+  object with a non-implemented value under `as` a cast, TypeScript will now
+  catch it at compile time.
+
+#### Added
+
+- **`TesseraError` / `TesseraErrorCode`** (`src/errors.ts`, exported from `.`,
+  `./capability`, and `./nostr`) — every `throw` reachable from this kit is
+  now a `TesseraError` with a readonly, stable `code` (SCREAMING_SNAKE,
+  grouped by prefix: `PARSE_*`, `CODEC_*`, `SIGN_*`, `VERIFY_*`,
+  `CAPABILITY_*`, `BUILD_*`, `TEST_*`, `INPUT_*` — documented as a stable
+  contract in PROTOCOL.md §9). Messages are UNCHANGED. Security rule:
+  `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH` is the one opaque code for a bad
+  signature, wrong signer, or wrong context — never split further.
+  `vectors/reject.golden.v1.json` and `keyed-member-key.golden.v1.json` now
+  assert on `expectedErrorCode`, not a message substring.
+- **Conformance vectors at realistic sizes** (`CONFORMANCE.md` is new):
+  `kflt-sizes.golden.v1.json` (n=0,1,2,3,9,100,1000 — degenerate-n guard
+  input and the two smallest segment-length transitions, full blob hex),
+  `kflt-retry-seed.golden.v1.json` (n=829, the smallest input found needing a
+  seed retry to converge), `kflt-large-10000.golden.v1.json` and
+  `kflt-large-100000.golden.v1.json` (geometry + blob-hash + ≥20
+  present/absent samples, members regenerated from a documented deterministic
+  rule rather than stored inline). `signed-blob.golden.v1.json` regenerated
+  with `context` and a must-reject wrong-context case.
+- **PROTOCOL.md §9** — the error-codes table (stable contract).
+- **`isValidFilterContext(ctx: unknown): boolean`** (`sign.ts`, exported from
+  `.`) — kenspeckle-adoption follow-up: the one reusable predicate for "is
+  this a valid signing `context`" (non-empty string, well-formed UTF-16,
+  ≤1024 UTF-8 bytes), so a caller can validate a `context` value up front
+  without hand-rolling the same three rules. `signFilterBlob` and
+  `verifyFilterBlob` use this SAME function internally — it is the single
+  source of truth, not a parallel copy of the rules their own error codes
+  already encode.
+
+#### Docs
+
+- **The kindred `namespace` MUST NOT contain a colon** (`serverId` may) —
+  kenspeckle-adoption follow-up, PROTOCOL.md §4.3/§6. Without this rule, two
+  different `(namespace, serverId)` pairs can produce the byte-identical
+  `kindred:members:<namespace>:<serverId>` string by shifting where the
+  `d`-tag's first colon after the prefix falls (e.g. `("a", "b:c")` and
+  `("a:b", "c")` both give `...a:b:c`), which lets a relay serve one
+  deployment's blob as another's when the context strings collide.
+- **When to call `verifyFilterBlob` directly vs. `verifyAndParseFilter`**
+  (PROTOCOL.md §4.3, and both functions' JSDoc) — kenspeckle-adoption
+  follow-up: use `verifyAndParseFilter` when you hold a fixed pinned key;
+  call `verifyFilterBlob(blob, context)` yourself, check the returned
+  `signerPubkeyHex` against a key authenticated some other way (e.g. the
+  Nostr event author, as kenspeckle's `requireAuthorIsSigner` does), and only
+  then `parseFilter`, when the trusted key isn't a static pin.
+- **kindred vs. kenspeckle, said consistently.** `kindred` is the wire
+  protocol/addressing convention name (the d-tag, the kind); `kenspeckle` is
+  the code that implements it (`@forgesworn/kenspeckle`). README, llms.txt,
+  PROTOCOL.md, and SECURITY.md no longer conflate the two (e.g. PROTOCOL.md
+  §6 was "zero `kindred` dependency" — you can't depend on a naming
+  convention; it's now "zero `kenspeckle` dependency"). llms.txt's quick
+  start now uses `verifyAndParseFilter` (with `context`), matching its own
+  "recommended" API guidance instead of the two-call hand-rolled path.
+- **Every `§`-section cross-reference fixed.** Several source comments and
+  `properties.test.ts` cited PROTOCOL.md sections that never existed (`§7.3`,
+  `§7.4`, `§7.5`, `§7.6`, `§10`, `§10.2`, `§6.2`, `§12.2`, `§15`) — likely
+  left over from a section renumbering. Every one now points at the section
+  that actually documents the claim (mostly §1, §2.8, §3, §4.2, §5, §6, §7.2,
+  or SECURITY.md's own numbered sections where the claim lives there
+  instead). `properties.test.ts` also no longer says "S = members" for the
+  accumulation formula's `S` — it's a SERVER count (§7.2), a stale comment
+  the PROTOCOL.md fix in the prior pass didn't propagate to this test file.
 
 ### Second review pass
 
@@ -255,9 +373,14 @@ published, so this is the first shape consumers actually build against.
 - **B10 (LOW): an empty/short/odd-length `decoySeedHex` produced predictable
   decoys or leaked a raw error.** See `### Breaking`.
 
-## [0.1.0] — Unreleased
+## [0.1.0] — Never published
 
-First public release: a privacy-preserving **membership-presence filter**. A
+**This version never shipped to npm.** It was superseded by the audit and
+review passes folded into 0.2.0 (above) before any release; it is kept here
+only as a historical record of the initial design, not as an installable
+version — there is no `v0.1.0` git tag and there never will be one.
+
+Planned first release: a privacy-preserving **membership-presence filter**. A
 community server publishes one signed, immutable `KFLT` blob per epoch; a client
 that already holds a friend's pubkey can test that one key against the blob
 **locally**, with no enumeration affordance and no online query API.
@@ -294,11 +417,19 @@ that already holds a friend's pubkey can test that one key against the blob
 
 - **Scoped package name.** This package publishes as **`@forgesworn/tessera-kit`**.
 - **Publish order.** `@forgesworn/tessera-kit` MUST be on npm **before**
-  `@forgesworn/kindred` — `kindred` depends on it.
+  `@forgesworn/kenspeckle` — `kenspeckle` (the code implementing the
+  `kindred` wire convention) depends on it. This note used the package's
+  working-title name `kindred` at the time it was written; it was renamed to
+  `kenspeckle` before any publish, and `kindred` now names only the wire
+  protocol/addressing convention, not a package (see PROTOCOL.md §6).
 - **Relationship-agnostic by design.** tessera-kit knows nothing about
-  relationships, personas, or Nostr **kinds** — *kinds are `kindred`'s concern*.
-  This package only builds, tests, signs, serializes, and parses membership
-  filters; the discovery/relationship layer lives in `@forgesworn/kindred`.
+  relationships, personas, or Nostr **kinds** — *kinds are kenspeckle's
+  concern*. This package only builds, tests, signs, serializes, and parses
+  membership filters; the discovery/relationship layer lives in
+  `@forgesworn/kenspeckle`.
 
 [0.2.0]: https://github.com/forgesworn/tessera-kit/releases/tag/v0.2.0
-[0.1.0]: https://github.com/forgesworn/tessera-kit/releases/tag/v0.1.0
+
+<!-- No [0.1.0] link — that version was never published and no v0.1.0 tag
+     exists or ever will; see the note under "## [0.1.0] — Never published"
+     above. Do not add a link reference for it. -->

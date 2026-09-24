@@ -16,6 +16,11 @@ describe('BinaryFuse16', () => {
   })
 
   it('false-positive rate ≈ 2^-16 over 200k non-members', () => {
+    // Explicit timeout (review follow-up) — this takes ~4s alone and hit
+    // vitest's 5000ms default timeout under load (the whole suite running
+    // concurrently, or a busy CI runner), which is a false failure, not a
+    // real regression. 30s is generous headroom without masking an actual
+    // hang.
     const members = keys(2000)
     const f = BinaryFuse16.build(members)
     const memberSet = new Set(members)
@@ -31,7 +36,7 @@ describe('BinaryFuse16', () => {
     }
     const rate = fp / trials
     expect(rate).toBeLessThan(0.0005) // 2^-16 ≈ 1.5e-5; generous ceiling absorbs variance
-  })
+  }, 30_000)
 
   it('all positions land within arrayLength', () => {
     const f = BinaryFuse16.build(keys(500))

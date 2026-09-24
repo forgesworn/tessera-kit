@@ -1,4 +1,4 @@
-// Size-bucket padding + decoy pool (spec §7.5).
+// Size-bucket padding + decoy pool (spec §2.8).
 //
 // WHAT THIS BUYS (and what it does NOT):
 //   A published filter's on-wire array size is a function of the number of keys
@@ -6,7 +6,7 @@
 //   rounds the inserted-key count up to the next power-of-two bucket by adding
 //   DECOY keys, so the serialized size reveals only the coarse bucket.
 //   `_memberCountBand` still records the TRUE count's bucket — that coarse count
-//   "leaks by design" (spec §7.5); padding hides only the fine count.
+//   "leaks by design" (spec §2.8); padding hides only the fine count.
 //
 // DECOY STABILITY IS A DOUBLE-EDGED PROPERTY (audit fix — read before choosing):
 //   Fuse fingerprint slots are XOR-SHARED across every inserted key (member AND
@@ -47,6 +47,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, concatBytes, randomBytes } from '@noble/hashes/utils.js'
+import { TesseraError } from './errors.js'
 
 /**
  * Smallest power of two ≥ n (n ≥ 0).
@@ -62,6 +63,13 @@ import { bytesToHex, hexToBytes, concatBytes, randomBytes } from '@noble/hashes/
  * it, so the two can never drift apart.
  */
 export function nextPowerOfTwoBand(n: number): number {
+  // Follow-up review fix — previously any value silently "worked": a
+  // non-number `n` coerces to NaN in `p < n`, which is always false, so the
+  // loop never runs and `1` is returned with no signal the input was
+  // nonsense (e.g. a caller error passing a string where a count belongs).
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+    throw new TesseraError('INPUT_BAND_INVALID', 'nextPowerOfTwoBand: n must be a non-negative finite number')
+  }
   let p = 1
   while (p < n) p *= 2
   return p
@@ -97,7 +105,19 @@ export function deriveDecoys(decoySeedHex: string, count: number): string[] {
     !/^[0-9a-f]*$/i.test(decoySeedHex) ||
     decoySeedHex.length % 2 !== 0
   ) {
-    throw new Error('deriveDecoys: decoySeedHex must be non-empty, even-length hex')
+    throw new TesseraError(
+      'INPUT_DECOY_SEED_HEX_INVALID',
+      'deriveDecoys: decoySeedHex must be non-empty, even-length hex',
+    )
+  }
+  // Follow-up review fix — `count` previously reached `new Array(count)`
+  // unguarded: `new Array(NaN)` throws a raw RangeError ("Invalid array
+  // length"), and a non-number `count` (e.g. a string) does NOT trigger
+  // `Array`'s length-setting special case, so it silently returned a
+  // 1-element array containing that value instead of `count` decoys — a
+  // corrupt, mis-typed "valid return" that's worse than a throw.
+  if (typeof count !== 'number' || !Number.isSafeInteger(count)) {
+    throw new TesseraError('INPUT_DECOY_COUNT_INVALID', 'deriveDecoys: count must be a safe integer')
   }
   if (count <= 0) return []
   const seedBytes = hexToBytes(decoySeedHex.toLowerCase())

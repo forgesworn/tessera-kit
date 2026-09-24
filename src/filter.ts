@@ -4,7 +4,7 @@
 //
 // IMPORTANT — this module does NOT salt/transform the caller's member keys.
 // `buildMembershipFilter` receives member keys that the CALLER has already passed
-// through `memberKey()` (spec §12.2: the server decides open vs keyed and calls
+// through `memberKey()` (spec §1: the server decides open vs keyed and calls
 // `memberKey(pk)` or `memberKey(pk, salt)` before handing the array here). We
 // only record `keyed = opts.salt !== undefined` so the on-wire blob flag (TK-4)
 // reflects how the keys were derived; we never re-hash with the salt. Symmetrically,
@@ -12,7 +12,7 @@
 // — the discovery layer is responsible for transforming its query the same way
 // the pool was built.
 //
-// The ONE set-level transform we apply is size-bucket PADDING (spec §7.5,
+// The ONE set-level transform we apply is size-bucket PADDING (spec §2.8,
 // `padding.ts`): when `padToBucket` is on (default), we ADD decoy keys to round
 // the set size up to a power-of-two bucket. Decoys are extra inserted keys; they
 // never alter or replace a real member, and a decoy testing true is harmless (it
@@ -24,6 +24,7 @@ import { bytesToHex, hexToBytes, concatBytes, utf8ToBytes } from '@noble/hashes/
 import { BinaryFuse16 } from './fuse.js'
 import { nextPowerOfTwoBand, padMembersToBucket } from './padding.js'
 import { isValidSaltHex } from './member-key.js'
+import { TesseraError } from './errors.js'
 import type { FilterBuildOptions, MembershipFilter } from './types.js'
 
 /** Every member key handed to `buildMembershipFilter` must already be a
@@ -43,10 +44,10 @@ function assertDecoySeedHex(decoySeedHex: string): void {
     !/^[0-9a-f]*$/i.test(decoySeedHex) ||
     decoySeedHex.length % 2 !== 0
   ) {
-    throw new Error('tessera-kit: decoySeedHex must be even-length hex')
+    throw new TesseraError('BUILD_DECOY_SEED_HEX_INVALID', 'tessera-kit: decoySeedHex must be even-length hex')
   }
   if (decoySeedHex.length < 32) {
-    throw new Error('tessera-kit: decoySeedHex must be at least 16 bytes (32 hex chars)')
+    throw new TesseraError('BUILD_DECOY_SEED_HEX_TOO_SHORT', 'tessera-kit: decoySeedHex must be at least 16 bytes (32 hex chars)')
   }
 }
 
@@ -63,7 +64,7 @@ function assertDecoySeedHex(decoySeedHex: string): void {
  *  defines what a salt looks like everywhere in this kit. */
 function assertBuildSalt(salt: string): void {
   if (typeof salt !== 'string' || !isValidSaltHex(salt)) {
-    throw new Error('tessera-kit: opts.salt must be non-empty even-length hex')
+    throw new TesseraError('BUILD_SALT_INVALID', 'tessera-kit: opts.salt must be non-empty even-length hex')
   }
 }
 
@@ -121,7 +122,7 @@ function deriveEpochDecoySeedHex(seedHex: string, epoch: number): string {
  *                       TRUE — the deduped set is padded with decoys up to the
  *                       next power-of-two bucket before building, so the on-wire
  *                       array size reveals only the coarse bucket, not the fine
- *                       count (spec §7.5). Pass `decoySeedHex` (even-length hex,
+ *                       count (spec §2.8). Pass `decoySeedHex` (even-length hex,
  *                       ≥16 bytes) for STABLE-PER-EPOCH decoys: rebuilding the
  *                       SAME epoch with the SAME seed reproduces the identical
  *                       blob, but each new epoch gets a fresh decoy set derived
@@ -136,17 +137,27 @@ export function buildMembershipFilter(
   memberKeysHex: string[],
   opts: FilterBuildOptions,
 ): MembershipFilter {
+  // Follow-up review fix — type guards BEFORE any field/element access. A
+  // non-array `memberKeysHex` previously reached `.length` and threw a raw
+  // TypeError; a non-object `opts` previously reached `opts.fingerprintBits`
+  // and did the same.
+  if (!Array.isArray(memberKeysHex)) {
+    throw new TesseraError('BUILD_MEMBER_KEYS_TYPE', 'tessera-kit: memberKeysHex must be an array')
+  }
+  if (opts === null || typeof opts !== 'object') {
+    throw new TesseraError('BUILD_OPTS_TYPE', 'tessera-kit: opts must be an object')
+  }
   const fingerprintBits = opts.fingerprintBits ?? 16
   if (fingerprintBits !== 16) {
     // 8/20/32 are reserved in the KFLT byte format for forward-compat but are
     // not implemented. Fail loud rather than silently building a 16-bit filter.
-    throw new Error('tessera-kit: only fingerprintBits=16 implemented')
+    throw new TesseraError('BUILD_FINGERPRINT_BITS_UNSUPPORTED', 'tessera-kit: only fingerprintBits=16 implemented')
   }
 
   // `epoch` must be a non-negative safe integer (audit fix — see `codec.ts`
   // parseFilter's mirrored range check on the read side).
   if (!Number.isSafeInteger(opts.epoch) || opts.epoch < 0) {
-    throw new Error('tessera-kit: epoch must be a non-negative safe integer')
+    throw new TesseraError('BUILD_EPOCH_INVALID', 'tessera-kit: epoch must be a non-negative safe integer')
   }
 
   if (opts.decoySeedHex !== undefined) {
@@ -170,7 +181,7 @@ export function buildMembershipFilter(
   for (let i = 0; i < memberKeysHex.length; i++) {
     const k = memberKeysHex[i] as string
     if (typeof k !== 'string' || !HEX64_CI.test(k)) {
-      throw new Error(`tessera-kit: memberKeysHex[${i}] must be 64 hex chars`)
+      throw new TesseraError('BUILD_MEMBER_KEY_INVALID', `tessera-kit: memberKeysHex[${i}] must be 64 hex chars`)
     }
     const lower = k.toLowerCase()
     if (!seen.has(lower)) {
@@ -181,10 +192,10 @@ export function buildMembershipFilter(
 
   // Band ALWAYS reflects the TRUE (deduped) member count rounded up to a power
   // of two — NOT the padded array size. This coarse count "leaks by design"
-  // (spec §7.5); padding hides only the fine count, not the bucket.
+  // (spec §2.8); padding hides only the fine count, not the bucket.
   const _memberCountBand = nextPowerOfTwoBand(deduped.length)
 
-  // Padding (spec §7.5): default ON. Pad the deduped set with decoys up to the
+  // Padding (spec §2.8): default ON. Pad the deduped set with decoys up to the
   // size bucket so the serialized array size reveals only the coarse bucket.
   // `decoySeedHex` set ⇒ STABLE-PER-EPOCH decoys (deterministic within an epoch,
   // fresh across epochs — defeats churn-diffing, see `deriveEpochDecoySeedHex`
@@ -234,8 +245,13 @@ const HEX64 = /^[0-9a-f]{64}$/i
  * at ≈ 2^-16.
  */
 export function testMembership(f: MembershipFilter, valueHex: string): boolean {
+  // Follow-up review fix — a non-MembershipFilter `f` previously reached
+  // `f._fuse.contains(...)` and threw a raw TypeError. Checked first.
+  if (f === null || typeof f !== 'object' || !f._fuse) {
+    throw new TesseraError('TEST_FILTER_TYPE', 'tessera-kit: testMembership filter (f) must be a MembershipFilter')
+  }
   if (typeof valueHex !== 'string' || !HEX64.test(valueHex)) {
-    throw new Error('tessera-kit: testMembership value must be 64 hex chars')
+    throw new TesseraError('TEST_VALUE_INVALID', 'tessera-kit: testMembership value must be 64 hex chars')
   }
   return f._fuse.contains(valueHex.toLowerCase())
 }

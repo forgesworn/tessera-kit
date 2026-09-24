@@ -18,6 +18,7 @@
 
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hexToBytes } from '@noble/hashes/utils.js'
+import { TesseraError } from './errors.js'
 
 const MASK64 = (1n << 64n) - 1n
 
@@ -260,7 +261,7 @@ export class BinaryFuse16 {
     }
 
     if (stacksize !== n) {
-      throw new Error('fuse: construction failed to converge')
+      throw new TesseraError('BUILD_FUSE_CONSTRUCTION_FAILED', 'fuse: construction failed to converge')
     }
 
     // Assign fingerprints in REVERSE peel order. For each peeled hash, the slot

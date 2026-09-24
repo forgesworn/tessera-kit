@@ -1,4 +1,4 @@
-// Presence-capability tokens (`./capability` subpath) — spec §7.4.
+// Presence-capability tokens (`./capability` subpath) — spec §5.
 //
 // WHAT THIS SOLVES: a KEYED presence server (one whose member pool is built over
 // `memberKey(pk, salt)`) is not openly probeable — you need the salt to compute
@@ -66,7 +66,7 @@
 // recompute and verify that binding from the bearer's side. This is an
 // INHERENT LIMIT of the keyed-pool design, not a gap this module can close: on
 // a keyed pool, the subject's signature is the ONLY assertion that memberValue
-// is theirs, and a consumer must trust it as such (PROTOCOL.md §7.4 / §5.4b).
+// is theirs, and a consumer must trust it as such (PROTOCOL.md §5 / §5.4b).
 //
 // ───────────────────────────────────────────────────────────────────────────
 // CANONICAL SIGNING BYTES (document verbatim in PROTOCOL.md / consume in TK-8):
@@ -111,7 +111,17 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { memberKey } from './member-key.js'
 import { testMembership } from './filter.js'
+import { hasLoneSurrogate } from './text.js'
+import { TesseraError } from './errors.js'
 import type { MembershipFilter } from './types.js'
+
+// Re-exported here (not just from the `.` barrel) because every error this
+// subpath's functions throw originates in THIS file — a consumer who only
+// imports `@forgesworn/tessera-kit/capability` (never the main entry)
+// shouldn't need a second import from `.` just to get `instanceof
+// TesseraError` / the `TesseraErrorCode` type.
+export { TesseraError } from './errors.js'
+export type { TesseraErrorCode } from './errors.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const SIG_HEX = /^[0-9a-f]{128}$/ // 64-byte Schnorr sig as hex
@@ -148,7 +158,7 @@ function assertExpiresAt(expiresAt: number, context: string): void {
     !Number.isSafeInteger(expiresAt) ||
     expiresAt < 0
   ) {
-    throw new Error(`${context}: expiresAt must be a non-negative safe integer`)
+    throw new TesseraError('CAPABILITY_EXPIRES_AT_INVALID', `${context}: expiresAt must be a non-negative safe integer`)
   }
 }
 
@@ -170,22 +180,15 @@ function canonicalDigest(
   return sha256(preimage)
 }
 
-/** Matches a lone (unpaired) UTF-16 surrogate: a high surrogate not followed by
- *  a low surrogate, or a low surrogate not preceded by a high surrogate. Used
- *  by `assertServerId` (L3 audit fix) instead of `String.prototype.isWellFormed`
- *  — that method is Node >=20/ES2024-only and this kit's `engines` field does
- *  not (yet) make that guarantee load-bearing for every consumer's runtime, so
- *  a regex check is used instead of depending on it. */
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
-
 /** Throw if `serverId` is empty, contains a colon (delimiter-injection guard),
  *  or is not well-formed UTF-16 (L3 audit fix — see below). */
 function assertServerId(serverId: string): void {
   if (typeof serverId !== 'string' || serverId.length === 0) {
-    throw new Error('capability: serverId must be a non-empty string')
+    throw new TesseraError('CAPABILITY_SERVER_ID_EMPTY', 'capability: serverId must be a non-empty string')
   }
   if (serverId.includes(':')) {
-    throw new Error(
+    throw new TesseraError(
+      'CAPABILITY_SERVER_ID_HAS_COLON',
       'capability: serverId must not contain a colon (delimiter-injection guard)',
     )
   }
@@ -198,9 +201,12 @@ function assertServerId(serverId: string): void {
   // issued for one string verifies when presented as the other (confirmed:
   // `probe.mjs` in the audit scratchpad). Rejecting any serverId containing a
   // lone surrogate closes that collision at the input boundary, on both issue
-  // and test (this function is shared by both).
-  if (LONE_SURROGATE.test(serverId)) {
-    throw new Error(
+  // and test (this function is shared by both). `hasLoneSurrogate` (`text.ts`)
+  // is the ONE definition of this check, shared with `sign.ts`'s `context`
+  // validation — the exact same collision applies to any signed string.
+  if (hasLoneSurrogate(serverId)) {
+    throw new TesseraError(
+      'CAPABILITY_SERVER_ID_NOT_WELL_FORMED',
       'capability: serverId must not contain an unpaired UTF-16 surrogate (not well-formed text)',
     )
   }
@@ -231,29 +237,35 @@ export function issuePresenceCapability(
   p: { serverId: string; subjectPubHex: string; salt?: string; expiresAt: number },
   subjectPrivHex: string,
 ): PresenceCapability {
+  // 0. Type guard (follow-up review fix) — a non-object `p` (null, a number)
+  //    previously reached `p.subjectPubHex` and threw a raw TypeError, before
+  //    even the subjectPrivHex checks below (which don't touch `p` at all).
+  if (p === null || typeof p !== 'object') {
+    throw new TesseraError('CAPABILITY_OPTS_TYPE', 'capability: p must be an object')
+  }
   // 1. Validate every field up front. `typeof` checks come FIRST on every
   //    string field (audit fix, L4) — calling `.toLowerCase()` on a non-string
   //    (e.g. `subjectPrivHex: undefined`, or a caller who passes a number by
   //    mistake) previously threw a raw @noble-unrelated `TypeError` straight
   //    out of THIS module, before any of the kit-shaped checks below ever ran.
   if (typeof subjectPrivHex !== 'string') {
-    throw new Error('capability: subjectPrivHex must be a string')
+    throw new TesseraError('CAPABILITY_SUBJECT_PRIV_HEX_TYPE', 'capability: subjectPrivHex must be a string')
   }
   const priv = subjectPrivHex.toLowerCase()
   if (!HEX64.test(priv)) {
-    throw new Error('capability: subjectPrivHex must be 64 hex chars')
+    throw new TesseraError('CAPABILITY_SUBJECT_PRIV_HEX_INVALID', 'capability: subjectPrivHex must be 64 hex chars')
   }
   if (typeof p.subjectPubHex !== 'string') {
-    throw new Error('capability: subjectPubHex must be a string')
+    throw new TesseraError('CAPABILITY_SUBJECT_PUB_HEX_TYPE', 'capability: subjectPubHex must be a string')
   }
   const subjectPubHex = p.subjectPubHex.toLowerCase()
   if (!HEX64.test(subjectPubHex)) {
-    throw new Error('capability: subjectPubHex must be 64 hex chars')
+    throw new TesseraError('CAPABILITY_SUBJECT_PUB_HEX_INVALID', 'capability: subjectPubHex must be 64 hex chars')
   }
   assertServerId(p.serverId)
   assertExpiresAt(p.expiresAt, 'capability')
   if (p.salt !== undefined && typeof p.salt !== 'string') {
-    throw new Error('capability: salt must be a string')
+    throw new TesseraError('CAPABILITY_SALT_TYPE', 'capability: salt must be a string')
   }
   // `memberKey` itself validates `salt`'s HEX SHAPE (even-length hex) when it
   // is defined — no need to duplicate that check here, only the `typeof` gate
@@ -266,9 +278,21 @@ export function issuePresenceCapability(
   try {
     // 2. Assert the claimed subjectPubHex really is this priv's x-only pubkey, so
     //    a caller can't issue a capability for a key they don't hold. (Tested.)
-    const derivedPubHex = bytesToHex(schnorr.getPublicKey(privBytes))
+    //    Follow-up review fix — a 64-hex key out of range for the secp256k1
+    //    scalar field (zero, or >= the curve order) previously escaped as a
+    //    raw @noble RangeError/Error from `getPublicKey`. Wrapped here.
+    let derivedPubHex: string
+    try {
+      derivedPubHex = bytesToHex(schnorr.getPublicKey(privBytes))
+    } catch {
+      throw new TesseraError(
+        'CAPABILITY_SUBJECT_PRIV_HEX_OUT_OF_RANGE',
+        'capability: subjectPrivHex is not a valid secp256k1 scalar (zero or >= curve order)',
+      )
+    }
     if (derivedPubHex !== subjectPubHex) {
-      throw new Error(
+      throw new TesseraError(
+        'CAPABILITY_SUBJECT_KEY_MISMATCH',
         'capability: subjectPubHex does not match subjectPrivHex (cannot issue for a key you do not control)',
       )
     }
@@ -336,7 +360,7 @@ export function issuePresenceCapability(
  * the subject's signature is the ONLY assertion available that `memberValue`
  * is theirs, and it must be trusted as such. This is documented as an
  * inherent limit of the keyed-pool design, not something a future patch can
- * close from the bearer's side (PROTOCOL.md §7.4 / §5.4b).
+ * close from the bearer's side (PROTOCOL.md §5 / §5.4b).
  *
  * REMEMBER (see the module note): this check does not — and cannot — enforce
  * single use. A capability that passes here is a valid BEARER credential; it
@@ -356,6 +380,16 @@ export function testWithCapability(
   cap: PresenceCapability,
   now?: number,
 ): boolean {
+  // 0. Type guards (follow-up review fix) — a non-object `f` (null, a
+  //    number) previously reached `f.keyed` (step 4 below), and a non-object
+  //    `cap` previously reached `cap.subjectPubHex` (immediately below) —
+  //    both threw a raw TypeError. Checked before any field access.
+  if (f === null || typeof f !== 'object' || !f._fuse) {
+    throw new TesseraError('CAPABILITY_FILTER_TYPE', 'capability: filter (f) must be a MembershipFilter')
+  }
+  if (cap === null || typeof cap !== 'object') {
+    throw new TesseraError('CAPABILITY_CAP_TYPE', 'capability: cap must be an object')
+  }
   // 1. Validate field shapes (mirrors issue; rejects colon serverId on the test
   //    side too — the delimiter guard must hold wherever the canonical string is
   //    recomputed). `typeof` checks come FIRST on every string field (audit
@@ -363,27 +397,27 @@ export function testWithCapability(
   //    with `sig: undefined`) previously threw a raw `TypeError` instead of a
   //    kit-shaped capability error.
   if (typeof cap.subjectPubHex !== 'string') {
-    throw new Error('capability: subjectPubHex must be a string')
+    throw new TesseraError('CAPABILITY_SUBJECT_PUB_HEX_TYPE', 'capability: subjectPubHex must be a string')
   }
   const subjectPubHex = cap.subjectPubHex.toLowerCase()
   if (!HEX64.test(subjectPubHex)) {
-    throw new Error('capability: subjectPubHex must be 64 hex chars')
+    throw new TesseraError('CAPABILITY_SUBJECT_PUB_HEX_INVALID', 'capability: subjectPubHex must be 64 hex chars')
   }
   if (typeof cap.memberValue !== 'string') {
-    throw new Error('capability: memberValue must be a string')
+    throw new TesseraError('CAPABILITY_MEMBER_VALUE_TYPE', 'capability: memberValue must be a string')
   }
   const memberValue = cap.memberValue.toLowerCase()
   if (!HEX64.test(memberValue)) {
-    throw new Error('capability: memberValue must be 64 hex chars')
+    throw new TesseraError('CAPABILITY_MEMBER_VALUE_INVALID', 'capability: memberValue must be 64 hex chars')
   }
   assertServerId(cap.serverId)
   assertExpiresAt(cap.expiresAt, 'capability')
   if (typeof cap.sig !== 'string') {
-    throw new Error('capability: sig must be a string')
+    throw new TesseraError('CAPABILITY_SIG_TYPE', 'capability: sig must be a string')
   }
   const sig = cap.sig.toLowerCase()
   if (!SIG_HEX.test(sig)) {
-    throw new Error('capability: sig must be 128 hex chars (64-byte Schnorr sig)')
+    throw new TesseraError('CAPABILITY_SIG_INVALID_SHAPE', 'capability: sig must be 128 hex chars (64-byte Schnorr sig)')
   }
 
   // 2. Resolve the clock, THEN check expiry — checked BEFORE the signature and
@@ -392,10 +426,10 @@ export function testWithCapability(
   //    `false`), which would have skipped the expiry check entirely (audit fix).
   const nowSec = now ?? Math.floor(Date.now() / 1000)
   if (!Number.isFinite(nowSec)) {
-    throw new Error('capability: now must resolve to a finite number')
+    throw new TesseraError('CAPABILITY_CLOCK_NOT_FINITE', 'capability: now must resolve to a finite number')
   }
   if (nowSec > cap.expiresAt) {
-    throw new Error('capability expired')
+    throw new TesseraError('CAPABILITY_EXPIRED', 'capability expired')
   }
 
   // 3. Signature — recompute the exact canonical digest and verify against the
@@ -409,7 +443,7 @@ export function testWithCapability(
     sigValid = false
   }
   if (!sigValid) {
-    throw new Error('capability signature invalid')
+    throw new TesseraError('CAPABILITY_SIGNATURE_INVALID', 'capability signature invalid')
   }
 
   // 4. M2 audit fix — bind memberValue to subjectPubHex on an OPEN pool. On an
@@ -423,7 +457,7 @@ export function testWithCapability(
   //    subject's signature is the only assertion available that memberValue is
   //    theirs (see the doc comment above and the module note).
   if (!f.keyed && memberValue !== subjectPubHex) {
-    throw new Error('capability: memberValue does not match subjectPubHex (open pool)')
+    throw new TesseraError('CAPABILITY_MEMBER_VALUE_MISMATCH', 'capability: memberValue does not match subjectPubHex (open pool)')
   }
 
   // 5. ONLY after sig + expiry + (open-pool) binding pass: test the carried

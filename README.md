@@ -63,25 +63,47 @@ const salt = serverKeyedSaltHex // distributed out-of-band; NEVER in the blob
 const keyedValues = keyedMemberPubkeys.map((pk) => memberKey(pk, salt))
 const keyedFilter = buildMembershipFilter(keyedValues, { epoch, salt })
 
-// Serialize to the KFLT blob, then sign it in place with the SERVER key. The
-// signature binds provenance: a tampered or attacker-authored blob is detectable.
+// Serialize to the KFLT blob, then sign it in place with the SERVER key, BOUND
+// to this deployment's `context` — the stable address a verifier already knows
+// out-of-band (e.g. a kindred d-tag `kindred:members:<ns>:<serverId>`; see
+// PROTOCOL.md §4.1/§4.3). The signature binds provenance AND this context: a
+// tampered or attacker-authored blob is detectable, and a blob signed for one
+// deployment cannot be replayed as another's, even under a reused signing key.
+//
+// ⚠️ `namespace` MUST NOT contain a colon (`serverId` may) — the d-tag is
+// parsed by splitting on the FIRST colon after "kindred:members:", so a
+// colon in `namespace` lets two different (namespace, serverId) pairs
+// collide on the same context string. See PROTOCOL.md §4.3/§6.
+const context = `kindred:members:${namespace}:${serverId}`
 const blob = serializeFilter(openFilter)
-signFilterBlob(blob, serverPrivHex) // mutates `blob`: writes signer pubkey + sig
+signFilterBlob(blob, serverPrivHex, context) // mutates `blob`: writes signer pubkey + sig
 
 // Publish `blob` however you like — HTTPS, or a Nostr kind-30444 event
 // (see PROTOCOL.md "Server publication shape" for the zero-dependency tag layout).
 ```
 
-### Client — parse, **verify against a pinned key**, check freshness, then test
+### Client — parse, **verify against a pinned key + context**, check freshness, then test
 
 ```typescript
 import { verifyAndParseFilter, testMembership, memberKey } from '@forgesworn/tessera-kit'
 
-// One call does the mandatory work: pin-verify the signer, parse, and (if you
-// pass minEpoch) reject a stale/rolled-back blob. Track the highest epoch
-// you've accepted per pinned key and pass it back in next time.
+// One call does the mandatory work: pin-verify the signer AND context, parse,
+// and (if you pass minEpoch) reject a stale/rolled-back blob. `context` MUST be
+// the SAME stable deployment address the server signed with (see above) — track
+// the highest epoch you've accepted per (pinnedPubkeyHex, context) and pass it
+// back in next time.
+//
+// ⚠️ Build `context` from the (namespace, serverId) YOU chose to fetch —
+// `namespace`/`serverId` here are values the client already had BEFORE
+// fetching anything (that's how it picked which event to ask for). NEVER
+// read the `d`-tag (or any other tag) off the event you just received and
+// use THAT to build `context` — a relay/MITM controls every tag on the
+// event it serves you, so trusting a tag-derived context lets it swap in a
+// different server's validly-signed blob and have your own code "confirm"
+// the substitution for it. See PROTOCOL.md §4.3/§6.
 const filter = verifyAndParseFilter(blob, {
   pinnedPubkeyHex: PINNED_SERVER_PUBKEY,
+  context: `kindred:members:${namespace}:${serverId}`,
   minEpoch: lastSeenEpoch, // optional; omit on first fetch
 })
 // filter.epoch is the blob's own SIGNED epoch — use THIS for freshness, never a
@@ -92,15 +114,16 @@ const filter = verifyAndParseFilter(blob, {
 // built: memberKey(friendPk) for an open pool, memberKey(friendPk, salt) keyed.
 const present = testMembership(filter, memberKey(friendPubkey))
 // `present === true` is a CANDIDATE, not a proof — at ecosystem scale ~1.5 false
-// hits accumulate per full sweep at 16-bit (PROTOCOL.md §FPR). Confirm on connect
+// hits accumulate per full sweep at 16-bit (PROTOCOL.md §7.2). Confirm on connect
 // (a key-control challenge) before acting on a hit.
 ```
 
-> A `KFLT` blob does not name the server/namespace it belongs to — the pinned
-> key is the only binding a consumer has. If you reuse one signing key across
-> several servers or namespaces, a relay/MITM can substitute one server's
-> validly-signed blob for another's and `verifyAndParseFilter` cannot tell.
-> Use a **distinct signing key per server/namespace** if that matters to you.
+> A `KFLT` blob does not name the server/namespace it belongs to in its header
+> — the signed `context` string is what binds it. A blob signed for one
+> deployment's `context` cannot verify under another's, even if the two
+> deployments share a signing key — using a **distinct signing key per
+> server/namespace** is still good practice (defence in depth), but it is no
+> longer the only thing standing between you and cross-server substitution.
 
 (`parseFilter` / `verifyFilterBlob` are still exported separately if you need
 them independently — `verifyAndParseFilter` is the recommended combined path.)
@@ -151,9 +174,9 @@ const friendPresent = testWithCapability(keyedFilter, cap)
 | `testMembership(filter, valueHex)` | Local membership test. No false negatives; false positives ≈ 2⁻¹⁶. |
 | `serializeFilter(filter)` | Encode to the `KFLT` blob (signer/sig regions left zero). |
 | `parseFilter(blob)` | Hardened decode — validates magic/version/geometry and recomputes length **before** allocating. Self-consistency only; **not** provenance. |
-| `signFilterBlob(blob, signerPrivHex)` | Sign the blob **in place** (writes signer pubkey + Schnorr sig). Zeroizes the priv byte copy. |
-| `verifyFilterBlob(blob)` | `{ signerPubkeyHex, ok }`. Never throws on hostile input. **Compare `signerPubkeyHex` to a pinned key before trusting a hit.** |
-| `verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? })` | The recommended combined path: pin-verifies, parses, and (if `minEpoch` given) rejects a stale/rolled-back filter. Throws on any failure. |
+| `signFilterBlob(blob, signerPrivHex, context)` | Sign the blob **in place** (writes signer pubkey + Schnorr sig), binding `context` (a required, non-empty string — the deployment's stable address) into the signed digest. Zeroizes the priv byte copy. |
+| `verifyFilterBlob(blob, context)` | `{ signerPubkeyHex, ok }`. Never throws on hostile **blob** input (throws on a malformed `context`, a caller config error). `context` must match what was signed or `ok` is `false`, indistinguishable from a bad signature. **Compare `signerPubkeyHex` to a pinned key before trusting a hit.** |
+| `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch? })` | The recommended combined path: pin-verifies, parses, and (if `minEpoch` given) rejects a stale/rolled-back filter. Throws on any failure. |
 | `nextPowerOfTwoBand(n)` | Size-bucket function (the `member_count_band`). |
 | `deriveDecoys(decoySeedHex, count)` | Deterministic decoy keys for a given `(decoySeedHex, count)`. `buildMembershipFilter` calls this with an epoch-derived seed, not the caller's raw `decoySeedHex` — see SECURITY.md §4. |
 
@@ -173,13 +196,14 @@ Optional, relationship-agnostic Nostr publication helpers (spec §6). This is
 the **only** subpath that pulls in `@scure/base` (for base64) — the core `.`
 and `./capability` entries stay `@noble`-only. A server that only needs to
 *publish* a filter can depend on tessera-kit alone via this subpath — no
-`kindred`/`kenspeckle` import required.
+`kenspeckle` import required.
 
 ```typescript
 import { buildFilterPublication, decodeFilterPublicationContent } from '@forgesworn/tessera-kit/nostr'
 
 // Server: assemble the unsigned Nostr event template around a signed KFLT blob.
-// tessera-kit does NOT know kindred's addressing convention — YOU supply kind/tags.
+// tessera-kit does NOT know kindred's addressing convention (the protocol
+// naming — see PROTOCOL.md §6) — YOU supply kind/tags.
 const event = buildFilterPublication({ kind: 30444, tags: [['d', 'my:d:tag']], blob, createdAt })
 // event.content is base64(blob); sign `event` with your own Nostr key (NIP-01) — separate
 // from the in-blob Schnorr provenance signature (signFilterBlob).
@@ -206,7 +230,7 @@ tessera-kit makes **narrow, honest** privacy claims. Before you build on it, rea
 
 - **Non-enumerable ≠ non-confirmable.** A held specific key is always confirmable-present.
 - **Keyed = speed-bump, not a boundary.** It does not confine probing to current members and does not survive a salt leak. Real member privacy = per-context personas + not joining open servers.
-- **Pin-verify is mandatory.** Always check `signerPubkeyHex` against a known server key before trusting a hit — a forged filter is a doxxing primitive.
+- **Pin-verify (key AND context) is mandatory.** Always check `signerPubkeyHex` against a known server key, and check against your deployment's own `context`, before trusting a hit — a forged filter is a doxxing primitive, and `context` is what stops one signed blob being replayed as a different deployment's.
 - **`member_count_band` leaks a coarse power-of-two count by design;** padding hides only the fine count.
 - **Salt rotation defeats array-diffing by non-holders** but a party holding candidate key X can still track X across epochs by re-testing.
 - **A capability is a bearer token, not a one-time token,** and reveals only its subject's own pool value, never the pool salt. `expiresAt` bounds only the `testWithCapability` check, not the disclosed value — salt rotation is the actual revocation.
@@ -214,11 +238,14 @@ tessera-kit makes **narrow, honest** privacy claims. Before you build on it, rea
 ## Toolkit
 
 tessera-kit is the membership-presence brick of the **Forgesworn / Signet**
-ecosystem. It is consumed by **`kindred`** (the relationships + discovery
-primitive): `kindred/discovery` is a thin layer over `parseFilter` /
-`testMembership` / `memberKey` that adds persona-scoping and signed Nostr
-publications. A server that only needs to *publish* a filter can depend on
-tessera-kit alone and emit the kind-30444 event directly (PROTOCOL.md).
+ecosystem. It is consumed by **`kenspeckle`** (the relationships + discovery
+primitive that implements the **kindred** wire protocol/convention —
+`kindred` is the addressing convention's name, `kenspeckle` is the code):
+`kenspeckle/discovery` is a thin layer over `parseFilter` / `testMembership` /
+`memberKey` that adds persona-scoping and signed Nostr publications following
+the kindred convention. A server that only needs to *publish* a filter can
+depend on tessera-kit alone and emit the kind-30444 event directly
+(PROTOCOL.md).
 
 Siblings: [`spoken-token`](https://github.com/forgesworn/spoken-token) (spoken
 verification words), [`geohash-kit`](https://github.com/forgesworn/geohash-kit)

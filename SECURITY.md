@@ -1,7 +1,8 @@
 # Security Policy
 
 tessera-kit makes **narrow, precise** privacy claims and refuses the broad ones.
-This document is the honest posture (spec §7.4, §10). Read it before building on
+This document is the honest posture (PROTOCOL.md §4 provenance signature, §5
+capability tokens). Read it before building on
 the library — several intuitive-sounding guarantees are **deliberately not
 made**, and treating the kit as if they were would create a doxxing primitive.
 
@@ -40,24 +41,33 @@ get the list"; it does **not** say "you can't confirm a key you already hold."
 Keyed pools raise the bar on *who can confirm* to salt-holders (§1) — a
 speed-bump, not a boundary. Do not read "non-enumerable" as "private."
 
-### 3. Pin-verify the filter before trusting any hit — **mandatory**
+### 3. Pin-verify the filter — key AND context — before trusting any hit — **mandatory**
 
 A `KFLT` blob is just bytes a stranger served you. A **forged** filter is a
 doxxing primitive: an attacker who makes you trust an arbitrary membership set can
 make `testMembership` report a friend as "present" on a server they never joined
 (or hide a real member). Therefore:
 
-- Consumers **MUST** call `verifyFilterBlob(blob)` and compare the returned
-  `signerPubkeyHex` against a **pinned / out-of-band-known** server key **before**
-  trusting any membership result.
+- Consumers **MUST** call `verifyFilterBlob(blob, context)` — or, preferably,
+  `verifyAndParseFilter` — and compare the returned `signerPubkeyHex` against a
+  **pinned / out-of-band-known** server key **before** trusting any membership
+  result. `context` MUST be the verifier's own stable, out-of-band-known
+  deployment address (PROTOCOL.md §4.1/§4.3) — e.g. a kindred d-tag
+  `kindred:members:<namespace>:<serverId>`.
 - `verifyFilterBlob` returning `ok: true` means **only** "this blob carries an
-  internally-consistent BIP340 Schnorr signature by `signerPubkeyHex`." It is
-  **not** trust. Anyone can mint a validly self-signed blob under their own key;
-  the **pinned-key comparison**, not `ok` alone, is what defeats forged-filter
-  doxxing.
+  internally-consistent BIP340 Schnorr signature by `signerPubkeyHex`, over
+  THIS `context`." It is **not** trust. Anyone can mint a validly self-signed
+  blob under their own key for any context; the **pinned-key AND context
+  comparison**, not `ok` alone, is what defeats forged-filter doxxing —
+  including **cross-server/namespace substitution**: because `context` is
+  folded into the signed digest itself, a blob signed for one deployment can
+  never verify under a different deployment's context, even if the two
+  deployments share a signing key. A distinct signing key per server/namespace
+  is still good practice (defence in depth), but it is no longer the only
+  thing standing between you and that substitution.
 
 ```
-const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+const { signerPubkeyHex, ok } = verifyFilterBlob(blob, context)
 if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
 ```
 

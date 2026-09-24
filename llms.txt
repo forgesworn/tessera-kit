@@ -24,18 +24,22 @@ npm i @forgesworn/tessera-kit
 ```typescript
 import {
   memberKey, buildMembershipFilter, serializeFilter, signFilterBlob,
-  parseFilter, verifyFilterBlob, testMembership,
+  verifyAndParseFilter, testMembership,
 } from '@forgesworn/tessera-kit'
 
-// Server: build an open pool, serialize, sign in place, publish the bytes.
+// `context` is the deployment's stable, out-of-band-known address — e.g. a
+// kindred d-tag `kindred:members:<ns>:<serverId>`. Required on both sides.
+const context = `kindred:members:${namespace}:${serverId}`
+
+// Server: build an open pool, serialize, sign in place (bound to `context`),
+// publish the bytes.
 const f = buildMembershipFilter(pubkeys.map((pk) => memberKey(pk)), { epoch })
 const blob = serializeFilter(f)
-signFilterBlob(blob, serverPrivHex)
+signFilterBlob(blob, serverPrivHex, context)
 
-// Client: parse, VERIFY against a pinned key, then test a held friend key.
-const filter = parseFilter(blob)
-const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
-if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) throw new Error('untrusted')
+// Client: pin-verify (key AND context) + parse in one call — the recommended
+// path — then test a held friend key.
+const filter = verifyAndParseFilter(blob, { pinnedPubkeyHex: PINNED_SERVER_PUBKEY, context })
 const present = testMembership(filter, memberKey(friendPubkey))
 ```
 
@@ -47,8 +51,12 @@ const present = testMembership(filter, memberKey(friendPubkey))
   a speed-bump (needs the out-of-band salt), NOT a member-privacy boundary.
 - **KFLT blob** — 128-byte header (magic/version/flags/epoch/32-bit seed/geometry/
   signer-pubkey/Schnorr sig) + a u16 fingerprint array. See PROTOCOL.md.
-- **Provenance signature** — Schnorr over `sha256(blob[0..64) ‖ sha256(blob[128..end)))`.
-  `verifyFilterBlob` checks consistency; trust = comparing the signer to a PINNED key.
+- **Provenance signature** — Schnorr over a digest bound to a caller-supplied
+  `context` string (the deployment's stable address) plus
+  `blob[0..64) ‖ sha256(blob[128..end))`. `verifyFilterBlob(blob, context)`
+  checks consistency; trust = comparing the signer to a PINNED key AND the
+  context to your own deployment's address — a wrong context fails exactly
+  like a bad signature (no distinguishable error).
 - **Capability token** — subject-signed consent to be located (`./capability`); a
   BEARER token (reusable until `expiresAt`, not one-time), whose `memberValue`
   field reveals only the subject's own pool value, never the pool salt; still
@@ -66,9 +74,9 @@ const present = testMembership(filter, memberKey(friendPubkey))
 - `buildMembershipFilter(valuesHex, opts)` — build a Binary Fuse 16 filter (`opts.epoch` required)
 - `testMembership(filter, valueHex)` — local membership test (no false negatives; FP ≈ 2⁻¹⁶)
 - `serializeFilter(filter)` / `parseFilter(blob)` — KFLT encode / hardened decode
-- `signFilterBlob(blob, signerPrivHex)` — sign in place (Schnorr)
-- `verifyFilterBlob(blob)` — `{ signerPubkeyHex, ok }`; never throws
-- `verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? })` — recommended: pin-verify + parse + freshness in one call; use the RETURNED `filter.epoch` for freshness, never a Nostr `epoch` tag
+- `signFilterBlob(blob, signerPrivHex, context)` — sign in place (Schnorr), `context` required (non-empty, well-formed UTF-16, ≤1024 UTF-8 bytes) and bound into the digest
+- `verifyFilterBlob(blob, context)` — `{ signerPubkeyHex, ok }`; never throws on hostile blob input (throws on a malformed `context`)
+- `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch? })` — recommended: pin-verify + parse + freshness in one call; use the RETURNED `filter.epoch` for freshness, never a Nostr `epoch` tag
 - `nextPowerOfTwoBand(n)` / `deriveDecoys(seedHex, count)` — size band + deterministic decoy derivation (a given `(seedHex, count)` always yields the same decoys; see "Padding" above for why `buildMembershipFilter` re-keys this per epoch rather than using a caller's `decoySeedHex` unchanged)
 - types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, `KFLT_*`
 
@@ -78,17 +86,19 @@ const present = testMembership(filter, memberKey(friendPubkey))
 - type `PresenceCapability` = `{ serverId, subjectPubHex, memberValue, expiresAt, sig }` (`serverId` must be colon-free and is not bound to any filter)
 
 `./nostr` (optional; the ONLY subpath pulling in `@scure/base`, for base64 — `.` and `./capability` stay `@noble`-only):
-- `buildFilterPublication({ kind, tags, blob, createdAt })` — base64-encodes `blob` into `content`, assembles `{ kind, tags, content, created_at }`; relationship-agnostic (caller supplies `kind`/`tags` — tessera-kit does not know kindred/kenspeckle's addressing convention)
+- `buildFilterPublication({ kind, tags, blob, createdAt })` — base64-encodes `blob` into `content`, assembles `{ kind, tags, content, created_at }`; relationship-agnostic (caller supplies `kind`/`tags` — tessera-kit does not know kindred's addressing convention, the protocol naming that kenspeckle's code implements)
 - `decodeFilterPublicationContent(content, maxBytes?)` — inverse; length-capped (defaults/clamps to `KFLT_MAX_BLOB_BYTES`) BEFORE decoding
 - type `EventTemplate` = `{ kind, tags, content, created_at }` (structural Nostr event shape, no `nostr-tools` dep)
-- lets a server that only needs to *publish* a filter depend on tessera-kit alone, with no `kindred`/`kenspeckle` import required
+- lets a server that only needs to *publish* a filter depend on tessera-kit alone, with no `kenspeckle` import required
 
 ## Security
 
 Non-enumerable is NOT non-confirmable: a held specific pubkey is always
 confirmable-present. Keyed pools are a speed-bump, not a boundary. **Consumers
-MUST `verifyFilterBlob` against a pinned server key before trusting any hit** — a
-forged filter is a doxxing primitive. Full posture in SECURITY.md.
+MUST `verifyFilterBlob`/`verifyAndParseFilter` against a pinned server key AND
+the deployment's own context before trusting any hit** — a forged filter is a
+doxxing primitive, and a wrong context is what stops a blob signed for one
+deployment being replayed as another's. Full posture in SECURITY.md.
 
 ## Optional
 

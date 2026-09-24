@@ -10,8 +10,9 @@ Non-enumerable, signed, immutable membership-presence filters.
 This document specifies, for a clean-room re-implementer, the on-wire `KFLT`
 filter format, the Binary Fuse 16 construction (including the **exact** seed
 scheme so a blob can be reconstructed/verified bit-identically), the Schnorr
-provenance signature, the presence-capability canonical bytes, the zero-`kindred`
-Nostr publication shape, and the false-positive / accumulation math. It is the
+provenance signature, the presence-capability canonical bytes, the
+zero-`kenspeckle` Nostr publication shape (§6), and the false-positive /
+accumulation math. It is the
 authoritative byte-level reference; `README.md` is the usage guide and
 `SECURITY.md` is the honest privacy posture.
 
@@ -282,8 +283,8 @@ exactly `128 + arrayLength * 2`.
 |-------:|----:|-------|----------|
 | `0`  | 4 | `magic` = `"KFLT"` (`0x4B 0x46 0x4C 0x54`) | raw bytes |
 | `4`  | 1 | `format_version` = `1` | u8 |
-| `5`  | 1 | `filter_type` (`1`=fuse, `2`=xor, `3`=cuckoo) — only `1` emitted/accepted | u8 |
-| `6`  | 1 | `fingerprint_bits` (`8/16/20/32`) — only `16` emitted/accepted | u8 |
+| `5`  | 1 | `filter_type` (`1`=fuse, `2`=xor RESERVED, `3`=cuckoo RESERVED) — only `1` emitted/accepted | u8 |
+| `6`  | 1 | `fingerprint_bits` (`16` implemented; `8`/`20`/`32` RESERVED) — only `16` emitted/accepted | u8 |
 | `7`  | 1 | `flags`: bit0 `keyed`, bit1 `padded` | u8 |
 | `8`  | 8 | `epoch` (unix seconds) | LE64 |
 | `16` | 4 | `seed` — the 32-bit fuse seed | LE32 |
@@ -296,6 +297,18 @@ exactly `128 + arrayLength * 2`.
 
 Notes:
 
+- **`FilterType`/`FingerprintBits` (the exported TypeScript types) are narrowed
+  to exactly `1` and `16`** (item 4, pre-publish pass) — they say what the
+  implementation actually accepts, not the full reserved wire range. `2`/`3`
+  and `8`/`20`/`32` remain RESERVED at the byte-format level (so a future
+  `format_version` can implement one without a header-layout change) and
+  `parseFilter` still explicitly rejects each one at runtime, with its own
+  `TesseraErrorCode` (§9): `PARSE_INVALID_FILTER_TYPE` /
+  `PARSE_UNSUPPORTED_FILTER_TYPE` for `filter_type`,
+  `PARSE_INVALID_FINGERPRINT_BITS` / `PARSE_UNSUPPORTED_FINGERPRINT_BITS` for
+  `fingerprint_bits`. Narrowing the TYPES changed nothing about this runtime
+  behaviour — it only stopped the type system advertising values the
+  implementation has never accepted.
 - The **32-bit seed at offset 16** is the resolution of the seed-width question:
   a 4-byte field keeps the header at exactly 128 bytes and holds the 32-bit
   construction seed losslessly. On read it is zero-extended to 64 bits in `mix`.
@@ -355,44 +368,83 @@ already lost precision by being forced through `Number`.
 
 ---
 
-## 4. Provenance signature (Schnorr / BIP340)
+## 4. Provenance signature (Schnorr / BIP340), bound to a deployment context
 
 The blob is signed so an HTTPS- or relay-served blob carries provenance and
 tamper-evidence. A forged filter is a doxxing primitive (`SECURITY.md`), so the
 signature is what lets a consumer refuse an attacker-authored membership set.
+The signed digest also binds a caller-supplied **`context`** string — see §4.3
+for why, and what to pass.
 
 ### 4.1 Signed-message construction
 
-Identical on sign and verify — the only place the preimage is built:
+Identical on sign and verify — the only place the digest is built:
 
 ```
-preimage = blob[0..64)  ‖  sha256( blob[128..end) )
-digest   = sha256(preimage)                            // 32 bytes, the Schnorr message
-sig      = schnorr.sign(digest, signerPriv)            // 64-byte compact BIP340 sig → blob[64..128)
+digest = sha256( utf8("tessera-kflt-sig:v1")  ‖  0x00  ‖  u32be(byteLen(ctx))  ‖
+                  utf8(ctx)  ‖  blob[0..64)  ‖  sha256( blob[128..end) ) )
+sig    = schnorr.sign(digest, signerPriv)            // 64-byte compact BIP340 sig → blob[64..128)
 ```
 
+- `"tessera-kflt-sig:v1"` is a fixed **domain-separation tag** — without it, a
+  signature over this digest could in principle collide with a signature
+  intended for a different protocol that also happens to sign
+  `sha256(prefix ‖ context ‖ ...)`-shaped messages under the same key.
+  `KFLT_VERSION` (the on-wire header field, §3) stays `1` — this tag versions
+  the SIGNED DIGEST construction, not the byte layout, and the two are
+  independent.
+- `0x00` separates the fixed tag from the length-prefixed `ctx` that follows.
+  `u32be(byteLen(ctx))` is the big-endian 4-byte length, in UTF-8 bytes, of
+  `ctx` — together with the `0x00` separator this makes the
+  tag+len+context+header concatenation **unambiguous**: no `ctx` value can be
+  crafted to shift field boundaries and make two different `(ctx, blob)` pairs
+  hash identically (the same delimiter-injection reasoning as §5.3's
+  colon-free `serverId` guard, solved here with an explicit length prefix
+  instead of a forbidden character).
+- `ctx` is `utf8(context)` — **byte-exact, no Unicode normalisation** (same
+  policy as §5.3's `serverId`): two canonically-equivalent but byte-different
+  strings (e.g. NFC vs NFD) are DIFFERENT contexts and sign/verify differently.
+  A cross-language re-implementer MUST NOT normalise `context`.
 - `blob[0..64)` is the header fields (`[0,32)`) **plus the `signer_pubkey`**
   (`[32,64)`). Including the pubkey **binds the signer's identity** into the
   signature: swapping in a different pubkey changes the digest, so a forged-key
   swap cannot produce a self-consistent blob.
-- The 64-byte `sig` region `[64,128)` is **excluded** from the preimage (a
+- The 64-byte `sig` region `[64,128)` is **excluded** from the digest input (a
   signature cannot cover itself). It naturally falls outside the `[0,64)` slice.
 - `blob[128..end)` (the fingerprint array) is folded in via `sha256`, so any
   fingerprint tamper invalidates the signature.
 
-`signFilterBlob` derives the x-only pubkey from the private key, writes it to
-`[32,64)` **before** digesting, signs, writes the sig to `[64,128)`, and zeroizes
+`context` (spec §4.3) MUST be a non-empty string, well-formed UTF-16 (no lone
+UTF-16 surrogate — the same check §5.3 requires of `serverId`, sharing one
+implementation, `src/text.ts`), and its UTF-8 encoding MUST be at most 1024
+bytes. This is a caller-configuration value, not attacker-controlled blob
+data, so a malformed `context` is a **usage error** (throws its own distinct
+message) — a WRONG-but-well-formed `context` is a different case, handled at
+§4.3.
+
+`signFilterBlob(unsignedBlob, signerPrivHex, context)` validates `context`,
+derives the x-only pubkey from the private key, writes it to `[32,64)`
+**before** digesting, signs, writes the sig to `[64,128)`, and zeroizes
 the private-key byte copy in a `finally`.
 
 ### 4.2 Verification is consistency, not trust
 
-`verifyFilterBlob(blob) → { signerPubkeyHex, ok }`:
+`verifyFilterBlob(blob, context) → { signerPubkeyHex, ok }`:
 
 - reads `signer_pubkey` from `[32,64)` and `sig` from `[64,128)`, recomputes the
-  digest (§4.1), returns `ok = schnorr.verify(sig, digest, signer_pubkey)`;
-- never throws on hostile input: a `< 128`-byte OR a `> 64 MiB`
+  digest (§4.1) bound to `context`, returns
+  `ok = schnorr.verify(sig, digest, signer_pubkey)`;
+- never throws on hostile **blob** input: a `< 128`-byte OR a `> 64 MiB`
   (`KFLT_MAX_BLOB_BYTES`) blob returns `{ signerPubkeyHex: '', ok: false }`; a
-  malformed sig/pubkey yields `ok:false`.
+  malformed sig/pubkey yields `ok:false`;
+- DOES throw if `context` itself is malformed (§4.1) — that is a caller
+  configuration bug, not hostile blob data, so it is validated the same way
+  `pinnedPubkeyHex`/`minEpoch` are in `verifyAndParseFilter` (§4.3);
+- a `context` that is well-formed but simply **wrong** (a different
+  deployment's context, or the empty-vs-nonempty case aside) is NOT
+  distinguished from a bad signature — it folds into the digest before
+  verification runs, so it fails exactly the way a tampered signature would:
+  `ok: false`, nothing more specific.
 
 **L1 audit fix — the size cap is checked BEFORE any hashing.** `computeDigest`
 (§4.1) SHA-256s the entire `blob[128..end)` fingerprint region unconditionally.
@@ -413,35 +465,136 @@ which calls `verifyFilterBlob` first.
 > trusting any membership result:
 >
 > ```
-> const { signerPubkeyHex, ok } = verifyFilterBlob(blob)
+> const { signerPubkeyHex, ok } = verifyFilterBlob(blob, context)
 > if (!ok || signerPubkeyHex !== PINNED_SERVER_PUBKEY) reject()
 > ```
 
-### 4.3 `verifyAndParseFilter` — the combined pin + parse + freshness helper
+### 4.3 `verifyAndParseFilter` — the combined pin + context + parse + freshness helper
 
-`verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch? }) → MembershipFilter`
-(`sign.ts`) makes the mandatory pin comparison (§4.2) and an optional freshness
-check the only path: it calls `verifyFilterBlob`, throws unless `ok` **and** the
-signer matches `pinnedPubkeyHex` (case-insensitive), then `parseFilter`s, then
-throws if `minEpoch` is given and the parsed `epoch < minEpoch`.
+`verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch? }) →
+MembershipFilter` (`sign.ts`) makes the mandatory pin comparison (§4.2), the
+mandatory context binding, and an optional freshness check the only path: it
+calls `verifyFilterBlob(blob, context)`, throws unless `ok` **and** the signer
+matches `pinnedPubkeyHex` (case-insensitive), then `parseFilter`s, then throws
+if `minEpoch` is given and the parsed `epoch < minEpoch`.
+
+**Which function to call — it depends on how the signer key is known.**
+
+- **You have a PINNED signer key** (you already know, out-of-band, exactly
+  which `signerPubkeyHex` you trust for this `context`): call
+  `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch? })`. This
+  is the recommended path for the common case and does the pin comparison
+  for you — there is no way to forget it.
+- **The signer key is authenticated some OTHER way** (not a static pin) —
+  for example, kenspeckle's `requireAuthorIsSigner` check, which derives the
+  trusted key from the outer Nostr event's author (`pubkey`) rather than a
+  fixed constant, so "the pinned key" is only known AFTER the event arrives,
+  not in advance: call `verifyFilterBlob(blob, context)` directly, compare
+  the returned `signerPubkeyHex` against whatever your own mechanism
+  determined the trusted key to be, and only THEN call `parseFilter(blob)`
+  once that comparison passes. Do not call `verifyAndParseFilter` in this
+  case — it requires a `pinnedPubkeyHex` you'd have to already have picked
+  before knowing the answer.
+
+Either path performs the exact same three checks (signature, signer, and
+context); the difference is only WHERE the trusted `signerPubkeyHex` comes
+from and who is responsible for comparing it.
 
 **Freshness — use the blob's SIGNED `epoch`, never a Nostr `["epoch"]` tag.** A
 tag on a wrapping Nostr event is signed only by the event's Nostr publisher key,
 never by the pinned blob-signing key, and this kit never cross-checks a tag
 against the blob's own signed `epoch`. Relying on the tag for rollback
 protection lets a relay or MITM replay an old, validly-signed blob under a
-freshly-tagged event. Track the highest `epoch` you've accepted per pinned key
-and pass it back in as `minEpoch` on the next check (§6 restates this for the
-Nostr publication path specifically).
+freshly-tagged event. Track the highest `epoch` you've accepted per
+`(pinnedPubkeyHex, context)` and pass it back in as `minEpoch` on the next check
+(§6 restates this for the Nostr publication path specifically).
 
-**Cross-server/namespace substitution — the blob does not name its server.**
+**Cross-server/namespace substitution — closed cryptographically by `context`.**
 Nothing in the 128-byte header (§3) identifies which server or namespace a
-filter belongs to; `pinnedPubkeyHex` is the ONLY binding a consumer has. If one
-signing key is reused across several servers or namespaces, a relay or MITM can
-serve server A's validly-signed blob in place of server B's, and both the pin
-check and the `minEpoch` check will pass — the substitution is invisible at this
-layer. **Use a distinct signing key per server/namespace** if that distinction
-matters to your deployment; `verifyAndParseFilter` cannot detect this on its own.
+filter belongs to. Before the `context` binding existed, `pinnedPubkeyHex` was
+the ONLY defence a consumer had: if one signing key was reused across several
+servers or namespaces, a relay or MITM could serve server A's validly-signed
+blob in place of server B's, and both the pin check and the `minEpoch` check
+would pass — the substitution was invisible at that layer. `context` (§4.1)
+closes this: it is folded into the SIGNED DIGEST itself, so a blob signed for
+server A's context can never verify under server B's context, **even if both
+servers share the exact same signing key**. `opts.context` MUST be the
+verifier's own stable, out-of-band-known deployment address — the same string
+you'd already need to know in order to go fetch this filter in the first
+place, so a MITM/relay cannot simply relabel a different blob and have it
+pass. **Recommendation: a deployment's `context` should be the stable address
+the verifier already knows independently of the blob** — for the kindred
+convention (§6), that is the `d`-tag value itself,
+`kindred:members:<namespace>:<serverId>`. A consumer not using that convention
+should use its own equivalent stable, out-of-band-known identifier.
+
+> ⚠️ **For the kindred convention: `namespace` MUST NOT contain a colon
+> (`:`); `serverId` MAY.** `kindred:members:<namespace>:<serverId>` is a
+> colon-delimited string, and the convention's own parser (and a human
+> reading a `d`-tag) resolves it by splitting on the FIRST `:` AFTER the
+> fixed `kindred:members:` prefix — everything before that split is
+> `namespace`, everything after (including any further colons) is
+> `serverId`. If `namespace` itself were allowed to contain a colon, two
+> DIFFERENT `(namespace, serverId)` pairs could produce the IDENTICAL
+> `context` string by shifting where the split falls: `("a", "b:c")` and
+> `("a:b", "c")` both concatenate to `kindred:members:a:b:c`. Since `context`
+> equality is the entire cross-server binding at the digest layer (§4.1) —
+> two different deployments that happen to produce the same `context` string
+> are, as far as `verifyFilterBlob` is concerned, indistinguishable — a relay
+> could then serve namespace `"a:b"` / server `"c"`'s validly-signed blob to
+> a verifier that actually asked for namespace `"a"` / server `"b:c"` (or
+> vice versa), and the context check would pass, because both parties
+> resolve to the byte-identical `context` string. This is exactly the same
+> shape as the delimiter-injection guard on `PresenceCapability.serverId`
+> (§5.3) — and, like that guard, matters most when the OTHER binding that
+> would normally catch it is weak or absent: kenspeckle's `d`-tag-driven
+> discovery is the primary place a consumer picks `(namespace, serverId)`
+> without an independent cross-check, and its `requireAuthorIsSigner` option
+> (binding the outer Nostr event's author key to the in-blob signer) can be
+> turned off for an aggregator that intentionally republishes under its own
+> key — with that check off, an ambiguous `namespace` is the only thing
+> stopping the swap above. **`serverId` has no equivalent restriction**: it is
+> the LAST segment, so it may contain colons (e.g. a hash, or a
+> `host:port`-shaped value) without creating any ambiguity — only a colon in
+> `namespace`, which lands BEFORE the split point, is unsafe.
+
+> ⚠️ **`context` MUST be built from the address the verifier CHOSE to
+> request — NEVER taken from the served event's own tags (e.g. its `d`-tag).**
+> This is the single most important rule for using `context` correctly, so it
+> is repeated here and in §6: a verifier already knows which
+> `(namespace, serverId)` — or equivalent identifier — it is asking about,
+> because that is how it picked which event to fetch in the first place
+> (discovery/subscription happens BEFORE the event arrives). Construct
+> `context` from THAT known-in-advance value. If instead you read the `d`-tag
+> (or any other tag) OFF the event you just received and pass THAT as
+> `context`, the check degenerates to "does this blob's context match a label
+> the event carries on itself" — which is ALWAYS true for any validly-signed
+> blob, no matter which deployment it was actually signed for, because a
+> relay or MITM controls the tags on whatever event it serves you. It could
+> swap in server A's validly-signed blob under an event whose `d`-tag says
+> "server B," and a verifier that trusts the tag would recompute `context`
+> from the ATTACKER-CONTROLLED label and accept it — exactly the substitution
+> `context` binding exists to prevent. `context` is only a defence when it
+> comes from something the MITM does not control: the verifier's own prior
+> knowledge of what it asked for, not anything shipped inside the answer.
+
+**A wrong context fails with the SAME generic error as a wrong signer or a
+tampered signature.** `verifyAndParseFilter` deliberately does not distinguish
+"signature invalid," "signer doesn't match `pinnedPubkeyHex`," and "context
+doesn't match" in its thrown message — all three throw
+`'verifyAndParseFilter: signature invalid or signer does not match the pinned
+key'` — so a caller (or an attacker probing error messages) cannot learn which
+check failed. A malformed `context` (empty, not well-formed UTF-16, or over
+1024 UTF-8 bytes — §4.1) is a distinct, separately-worded usage error, the same
+as a malformed `pinnedPubkeyHex`.
+
+**Distinct signing keys per server/namespace are now DEFENCE IN DEPTH, not the
+only mitigation.** With `context` binding in place, reusing one signing key
+across deployments no longer permits the substitution attack described above —
+`context` alone defeats it. Using a distinct key per server/namespace still
+adds a second, independent layer (e.g. it limits the blast radius of a single
+leaked private key to one deployment), and remains good practice, but it is no
+longer load-bearing for the substitution defence.
 
 ---
 
@@ -656,10 +809,17 @@ is sometimes referenced informally as "B11" in issue tracking, and the
 
 ---
 
-## 6. Server publication shape (zero `kindred` dependency)
+## 6. Server publication shape (zero `kenspeckle` dependency)
+
+**Terminology:** `kindred` is the WIRE PROTOCOL / addressing CONVENTION name
+(the `30444` kind, the `kindred:members:<namespace>:<serverId>` d-tag, the
+`#n` namespace tag) — it is not itself a package. `kenspeckle` is the CODE
+that implements that convention (`@forgesworn/kenspeckle`, the relationships +
+discovery primitive that consumes tessera-kit). The two are kept distinct
+throughout this document.
 
 A server that only needs to *publish* a filter can depend on **tessera-kit alone**
-— no `kindred` import required. The reusable mechanics live in the optional
+— no `kenspeckle` import required. The reusable mechanics live in the optional
 **`./nostr`** subpath (import `@forgesworn/tessera-kit/nostr`):
 
 ```
@@ -672,12 +832,13 @@ decodeFilterPublicationContent(content, maxBytes?) → Uint8Array   // inverse, 
 into `content` and assembles the `EventTemplate`, but the **caller supplies the
 `kind` and `tags`**. tessera-kit deliberately does **not** know kindred's
 addressing convention (the `30444` kind, the `kindred:members:` d-tag, the `#n`
-namespace tag) — `kindred/discovery` delegates to this builder, passing those
+namespace tag) — `kenspeckle/discovery` delegates to this builder, passing those
 values in. The `./nostr` subpath is the only one that pulls in `@scure/base` (for
 base64); the core `.` / `./capability` entries stay `@noble`-only.
 
-**Example — the addressable event `kindred` emits (kind `30444`):** the
-caller-supplied `kind` + `tags` that reproduce kindred's publication are:
+**Example — the addressable event a kenspeckle-based server emits, following
+the kindred convention (kind `30444`):** the caller-supplied `kind` + `tags`
+that reproduce that publication are:
 
 | Tag / field | Value |
 |-------------|-------|
@@ -688,15 +849,41 @@ caller-supplied `kind` + `tags` that reproduce kindred's publication are:
 | `["keyed", "0" \| "1"]` | whether the pool is keyed |
 | `content` | **base64 of the raw `KFLT` blob** (produced by `buildFilterPublication`) |
 
+> ⚠️ **`namespace` MUST NOT contain a colon (`:`); `serverId` MAY.** The
+> `d`-tag is parsed by splitting on the FIRST `:` after the fixed
+> `kindred:members:` prefix; everything before that split is `namespace`,
+> everything after (including further colons) is `serverId`. Without this
+> rule, two different `(namespace, serverId)` pairs can produce the
+> byte-identical `d`-tag/context string by shifting the split point — e.g.
+> `("a", "b:c")` and `("a:b", "c")` both give `kindred:members:a:b:c` — which
+> lets a relay serve one deployment's blob as if it were the other's, since
+> the signed-digest `context` check (§4.1/§4.3) only ever compares strings.
+> See §4.3 for the full reasoning and the `requireAuthorIsSigner` caveat.
+
 **Freshness — do NOT trust the `["epoch"]` tag for rollback protection.** The tag
 is signed only by the Nostr publisher key (standard NIP-01), never by the
 pinned blob-signing key (§4), and this kit never cross-checks it against the
 blob's own SIGNED `epoch` (KFLT header offset 8, §3). A relay or a malicious
 publisher can attach any tag value to any event, including a fresh tag on a
 replayed, older blob. Consumers **MUST** decode `content`, call
-`verifyAndParseFilter(blob, { pinnedPubkeyHex, minEpoch })` (§4.3), and use the
+`verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch })` (§4.3), and use the
 returned `filter.epoch` — the blob's own signed epoch — for the
 `epoch ≤ last-seen` freshness check per `(namespace, serverId)`, never the tag.
+
+> ⚠️ **Build `context` from the `(namespace, serverId)` you chose to fetch —
+> NEVER from the `d`-tag (or any other tag) on the event you just received.**
+> The whole point of the kindred addressing convention is that a client
+> already knows the `(namespace, serverId)` pair it wants BEFORE fetching
+> anything — that is how it constructs the subscription filter to find the
+> right addressable event in the first place. Pass `context =
+> "kindred:members:<namespace>:<serverId>"` built from THAT known-in-advance
+> pair. Do not instead read the event's own `["d", …]` tag and use it to build
+> `context` — a relay or malicious publisher controls every tag on the event
+> it serves you, so an attacker could serve server A's validly-signed blob
+> under an event tagged as server B's `d`-tag, and a verifier that trusts the
+> tag would happily recompute a "matching" `context` from the attacker's own
+> label and accept the substitution — precisely what `context` binding (§4.3)
+> exists to prevent. See §4.3 for the full reasoning.
 
 The event itself is signed by the publisher's Nostr key (standard NIP-01); that
 is **separate** from the in-blob Schnorr provenance signature (§4). A consumer
@@ -710,7 +897,7 @@ the recommended value).
 
 ---
 
-## 7. False-positive rate and accumulation budget (§7.6)
+## 7. False-positive rate and accumulation budget
 
 ### 7.1 Per-test FPR
 
@@ -773,4 +960,126 @@ though only 16 is implemented in v1.
 | seed Weyl step | `0x9e3779b9` |
 | capability prefix | `"tessera-cap:v2:"` |
 | decoy epoch-rekey prefix | `"tessera-decoy:v1:"` |
+| signing-digest domain tag | `"tessera-kflt-sig:v1"` |
+| `context` max UTF-8 bytes | `1024` |
 | publication kind | `30444` |
+
+---
+
+## 9. Error codes (`TesseraErrorCode`) — stable contract
+
+Every error this kit throws is a `TesseraError` (`src/errors.ts`, exported
+from `.`, `./capability`, and `./nostr`): `class TesseraError extends Error`
+with a readonly `code: TesseraErrorCode` and `name === 'TesseraError'`. The
+`code` values below are a **stable contract** — like an exported function
+name, removing or renaming one is a breaking change; adding a new code for a
+new failure mode is not. `message` text is NOT part of this contract and may
+be reworded at any time; only `code` should be matched programmatically.
+`vectors/reject.golden.v1.json` (and `keyed-member-key.golden.v1.json`'s
+`rejectCases`) freeze the exact `code` each listed malformed input must
+throw — see `CONFORMANCE.md`.
+
+Codes are grouped by the prefix before the first underscore:
+
+| Prefix | Owner | Meaning |
+|---|---|---|
+| `PARSE_*` | `parseFilter` (§3.1) | The hostile-input trust boundary for a raw `KFLT` blob. |
+| `CODEC_*` | `serializeFilter` (§3) | The codec's own output-size guard. |
+| `SIGN_*` | `signFilterBlob` (§4.1) | Signing-side input validation. |
+| `VERIFY_*` | `verifyFilterBlob` / `verifyAndParseFilter` (§4.2/§4.3) | Verify-side input validation, AND the single opaque trust-failure code (see below). |
+| `CAPABILITY_*` | `issuePresenceCapability` / `testWithCapability` (§5) | Capability issue/test validation and trust failures. |
+| `BUILD_*` | `buildMembershipFilter` (§2), and `BinaryFuse16.build`'s construction failure (only reachable through the build pipeline) | Filter-construction input validation and (pathological) non-convergence. |
+| `TEST_*` | `testMembership` | Query-value validation — distinct from `BUILD_*` because it validates a lookup, not anything about building. |
+| `INPUT_*` | `memberKey` (§1), `deriveDecoys` (§2.8), `decodeFilterPublicationContent` (§6) | Small, standalone utility-function input validation not owned by one of the verbs above. |
+
+**Security rule — `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH` is deliberately the
+ONLY code for "signature invalid," "signer doesn't match the pinned key," OR
+"context doesn't match what was signed."** These are never split into
+distinguishable codes, the same way §4.3 requires they never be split into
+distinguishable messages — a `code`-based checker must learn exactly as
+little about WHY a blob was rejected as a message-based one did.
+
+| Code | Thrown when |
+|---|---|
+| `PARSE_BLOB_TOO_SHORT` | blob shorter than the 128-byte header |
+| `PARSE_BLOB_TOO_LARGE` | blob longer than `KFLT_MAX_BLOB_BYTES` |
+| `PARSE_BAD_MAGIC` | the 4 magic bytes are not `"KFLT"` |
+| `PARSE_UNSUPPORTED_VERSION` | `format_version !== 1` |
+| `PARSE_INVALID_FILTER_TYPE` | `filter_type` outside the reserved set `{1,2,3}` |
+| `PARSE_UNSUPPORTED_FILTER_TYPE` | `filter_type` is a reserved-but-unimplemented value (`2`, `3`) |
+| `PARSE_INVALID_FINGERPRINT_BITS` | `fingerprint_bits` outside the reserved set `{8,16,20,32}` |
+| `PARSE_UNSUPPORTED_FINGERPRINT_BITS` | `fingerprint_bits` is a reserved-but-unimplemented value (`8`, `20`, `32`) |
+| `PARSE_SEGMENT_LENGTH_NOT_POWER_OF_TWO` | `segment_length` is not a power of two |
+| `PARSE_SEGMENT_LENGTH_OUT_OF_RANGE` | `segment_length` outside `[4, 2^18]` |
+| `PARSE_SEGMENT_COUNT_INVALID` | `segment_count < 1` |
+| `PARSE_GEOMETRY_OVERFLOW` | `segmentCountLength`/`arrayLength` would not be a safe integer — defensive; unreachable given the current u32/2^18 field-width bounds (see `codec.ts`'s comment at this check) |
+| `PARSE_ARRAY_TOO_LARGE` | the declared fingerprint array alone would exceed `KFLT_MAX_BLOB_BYTES` |
+| `PARSE_LENGTH_MISMATCH` | the geometry-recomputed expected length doesn't equal the actual blob length |
+| `PARSE_EPOCH_OVERFLOW` | header `epoch` exceeds `Number.MAX_SAFE_INTEGER` |
+| `PARSE_RESERVED_FLAGS_SET` | a reserved `flags` bit (2-7) is set |
+| `PARSE_MEMBER_COUNT_BAND_INVALID` | `member_count_band` is not a power of two |
+| `PARSE_BLOB_TYPE` | `parseFilter`'s `blob` is not a `Uint8Array` |
+| `CODEC_BLOB_TOO_LARGE` | `serializeFilter`'s own output would exceed `KFLT_MAX_BLOB_BYTES` |
+| `CODEC_FILTER_TYPE` | `serializeFilter`'s `f` is not a `MembershipFilter`-shaped object |
+| `SIGN_BLOB_TOO_SHORT` | `signFilterBlob`'s input blob is shorter than 128 bytes |
+| `SIGN_CONTEXT_EMPTY` | `signFilterBlob`'s `context` is empty or not a string |
+| `SIGN_CONTEXT_NOT_WELL_FORMED` | `signFilterBlob`'s `context` contains a lone UTF-16 surrogate |
+| `SIGN_CONTEXT_TOO_LONG` | `signFilterBlob`'s `context` UTF-8-encodes to over 1024 bytes |
+| `SIGN_PRIVATE_KEY_INVALID` | `signerPrivHex` is not 64 hex chars |
+| `SIGN_PRIVATE_KEY_OUT_OF_RANGE` | `signerPrivHex` is 64 hex chars but not a valid secp256k1 scalar (zero or >= curve order) |
+| `SIGN_BLOB_TYPE` | `signFilterBlob`'s `unsignedBlob` is not a `Uint8Array` |
+| `SIGN_PRIVATE_KEY_TYPE` | `signFilterBlob`'s `signerPrivHex` is not a string |
+| `VERIFY_CONTEXT_EMPTY` | `verifyFilterBlob`'s `context` is empty or not a string |
+| `VERIFY_CONTEXT_NOT_WELL_FORMED` | `verifyFilterBlob`'s `context` contains a lone UTF-16 surrogate |
+| `VERIFY_CONTEXT_TOO_LONG` | `verifyFilterBlob`'s `context` UTF-8-encodes to over 1024 bytes |
+| `VERIFY_PINNED_PUBKEY_INVALID` | `verifyAndParseFilter`'s `pinnedPubkeyHex` is not 64 hex chars |
+| `VERIFY_MIN_EPOCH_INVALID` | `verifyAndParseFilter`'s `minEpoch` is given but not a non-negative safe integer |
+| `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH` | the signature is invalid, OR the signer doesn't match `pinnedPubkeyHex`, OR `context` doesn't match what was signed — see the security rule above |
+| `VERIFY_STALE_EPOCH` | the parsed filter's `epoch` is older than `minEpoch` |
+| `VERIFY_BLOB_TYPE` | `verifyFilterBlob`'s `blob` is not a `Uint8Array` (a caller TYPE bug, distinct from the "never throws on hostile content" guarantee — §4.2) |
+| `VERIFY_OPTS_TYPE` | `verifyAndParseFilter`'s `opts` is not an object |
+| `CAPABILITY_EXPIRES_AT_INVALID` | `expiresAt` is not a non-negative safe integer (issue or test) |
+| `CAPABILITY_SERVER_ID_EMPTY` | `serverId` is empty or not a string |
+| `CAPABILITY_SERVER_ID_HAS_COLON` | `serverId` contains a colon (delimiter-injection guard) |
+| `CAPABILITY_SERVER_ID_NOT_WELL_FORMED` | `serverId` contains a lone UTF-16 surrogate |
+| `CAPABILITY_SUBJECT_PRIV_HEX_TYPE` | `issuePresenceCapability`'s `subjectPrivHex` is not a string |
+| `CAPABILITY_SUBJECT_PRIV_HEX_INVALID` | `subjectPrivHex` is not 64 hex chars |
+| `CAPABILITY_SUBJECT_PRIV_HEX_OUT_OF_RANGE` | `subjectPrivHex` is 64 hex chars but not a valid secp256k1 scalar (zero or >= curve order) |
+| `CAPABILITY_SUBJECT_PUB_HEX_TYPE` | `subjectPubHex` is not a string (issue or test) |
+| `CAPABILITY_SUBJECT_PUB_HEX_INVALID` | `subjectPubHex` is not 64 hex chars (issue or test) |
+| `CAPABILITY_SALT_TYPE` | `issuePresenceCapability`'s `salt` is given but not a string |
+| `CAPABILITY_SUBJECT_KEY_MISMATCH` | claimed `subjectPubHex` doesn't match the key that signed it |
+| `CAPABILITY_MEMBER_VALUE_TYPE` | `testWithCapability`'s `cap.memberValue` is not a string |
+| `CAPABILITY_MEMBER_VALUE_INVALID` | `cap.memberValue` is not 64 hex chars |
+| `CAPABILITY_SIG_TYPE` | `cap.sig` is not a string |
+| `CAPABILITY_SIG_INVALID_SHAPE` | `cap.sig` is not 128 hex chars |
+| `CAPABILITY_CLOCK_NOT_FINITE` | the resolved `now` clock value is not `Number.isFinite` |
+| `CAPABILITY_EXPIRED` | `now > cap.expiresAt` |
+| `CAPABILITY_SIGNATURE_INVALID` | the subject's Schnorr signature over the canonical tuple doesn't verify |
+| `CAPABILITY_MEMBER_VALUE_MISMATCH` | on an open pool, `memberValue !== subjectPubHex` (§5.4b) |
+| `CAPABILITY_OPTS_TYPE` | `issuePresenceCapability`'s `p` is not an object |
+| `CAPABILITY_FILTER_TYPE` | `testWithCapability`'s `f` is not a `MembershipFilter`-shaped object |
+| `CAPABILITY_CAP_TYPE` | `testWithCapability`'s `cap` is not an object |
+| `BUILD_DECOY_SEED_HEX_INVALID` | `opts.decoySeedHex` is malformed (not even-length hex) |
+| `BUILD_DECOY_SEED_HEX_TOO_SHORT` | `opts.decoySeedHex` is shorter than 16 bytes |
+| `BUILD_SALT_INVALID` | `opts.salt` is given but not non-empty even-length hex |
+| `BUILD_FINGERPRINT_BITS_UNSUPPORTED` | `opts.fingerprintBits` is anything other than `16` |
+| `BUILD_EPOCH_INVALID` | `opts.epoch` is not a non-negative safe integer |
+| `BUILD_MEMBER_KEY_INVALID` | a `memberKeysHex` entry is not 64 hex chars (message names the index) |
+| `BUILD_FUSE_CONSTRUCTION_FAILED` | Binary Fuse 16 peeling failed to converge within `MAX_ATTEMPTS` (pathological input; see CONFORMANCE.md) |
+| `BUILD_MEMBER_KEYS_TYPE` | `buildMembershipFilter`'s `memberKeysHex` is not an array |
+| `BUILD_OPTS_TYPE` | `buildMembershipFilter`'s `opts` is not an object |
+| `TEST_VALUE_INVALID` | `testMembership`'s query value is not 64 hex chars |
+| `TEST_FILTER_TYPE` | `testMembership`'s `f` is not a `MembershipFilter`-shaped object |
+| `INPUT_PUBKEY_INVALID` | `memberKey`'s `pubkeyHex` is not 64 lowercase hex chars |
+| `INPUT_PUBKEY_TYPE` | `memberKey`'s `pubkeyHex` is not a string |
+| `INPUT_SALT_INVALID` | `memberKey`'s `saltHex` is given but not non-empty even-length hex |
+| `INPUT_BAND_INVALID` | `nextPowerOfTwoBand`'s `n` is not a non-negative finite number |
+| `INPUT_DECOY_SEED_HEX_INVALID` | `deriveDecoys`'s `decoySeedHex` is empty or malformed |
+| `INPUT_DECOY_COUNT_INVALID` | `deriveDecoys`'s `count` is not a safe integer |
+| `INPUT_CONTENT_TYPE` | `decodeFilterPublicationContent`'s `content` is not a string |
+| `INPUT_MAX_BYTES_INVALID` | `decodeFilterPublicationContent`'s `maxBytes` is not a non-negative safe integer |
+| `INPUT_CONTENT_TOO_LARGE` | the base64 `content`'s length alone proves it would decode over the cap |
+| `INPUT_CONTENT_MALFORMED_BASE64` | `content` is not valid base64 |
+| `INPUT_CONTENT_DECODED_TOO_LARGE` | the actually-decoded length exceeds the cap (defence in depth beyond the length pre-check) |
+| `INPUT_PUBLICATION_TYPE` | `buildFilterPublication`'s `p` is not an object, or `p.blob` is not a `Uint8Array` |

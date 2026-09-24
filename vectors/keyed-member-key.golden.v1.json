@@ -22,19 +22,22 @@
       "description": "empty salt (memberKey(pk, '') gives no protection — anyone can compute sha256('' || pk))",
       "pubkeyHex": "65d27a48dfef406db8f5f437423bfa5f9c83d77bfc12f8a14b8ce3ede5892fb5",
       "saltHex": "",
-      "expectedErrorSubstring": "salt must be non-empty even-length hex"
+      "expectedErrorSubstring": "salt must be non-empty even-length hex",
+      "expectedErrorCode": "INPUT_SALT_INVALID"
     },
     {
       "description": "non-hex salt",
       "pubkeyHex": "65d27a48dfef406db8f5f437423bfa5f9c83d77bfc12f8a14b8ce3ede5892fb5",
       "saltHex": "zz",
-      "expectedErrorSubstring": "salt must be non-empty even-length hex"
+      "expectedErrorSubstring": "salt must be non-empty even-length hex",
+      "expectedErrorCode": "INPUT_SALT_INVALID"
     },
     {
       "description": "odd-length salt",
       "pubkeyHex": "65d27a48dfef406db8f5f437423bfa5f9c83d77bfc12f8a14b8ce3ede5892fb5",
       "saltHex": "abc",
-      "expectedErrorSubstring": "salt must be non-empty even-length hex"
+      "expectedErrorSubstring": "salt must be non-empty even-length hex",
+      "expectedErrorCode": "INPUT_SALT_INVALID"
     }
   ]
 }

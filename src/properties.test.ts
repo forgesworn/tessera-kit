@@ -1,5 +1,5 @@
-// Property-level tests for tessera-kit (spec §7.6 accumulation budget, §10.2
-// non-enumerability). These complement the per-module unit tests (106 of them):
+// Property-level tests for tessera-kit (PROTOCOL.md §7.2 accumulation budget,
+// SECURITY.md §2 non-enumerability). These complement the per-module unit tests:
 // the unit tests assert the building blocks behave; these two assert the
 // SYSTEM-LEVEL privacy/accuracy properties the spec makes load-bearing claims
 // about, and pin the honest framing of those claims in executable form.
@@ -12,18 +12,20 @@ import { serializeFilter } from './codec.js'
 import * as tesseraSurface from './index.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Part A.1 — Accumulation budget (spec §7.6)
+// Part A.1 — Accumulation budget (PROTOCOL.md §7.2)
 //
-// §7.6 corrected math:  E[false hits] = c · S · p
-//   where  c = candidate tests per sweep, S = members, p = per-test FPR.
+// §7.2 corrected math:  E[false hits] = c · S · p
+//   where  c = candidate tests per sweep, S = SERVERS (filters probed in the
+//   sweep — a server/filter count, NOT a member count; the per-test FPR p is
+//   independent of how many members are in any one filter, §7.1), p = per-test FPR.
 //   At 16-bit fingerprints, p ≈ 2^-16 ≈ 1.5e-5 (false-negative-free; only the
 //   false-POSITIVE rate matters for accumulation).
 //
 //   The spec's headline example is c=100, S=1000:
 //     E[false hits] = 100 · 1000 · 1.5e-5 ≈ 1.5 false hits per full sweep.
 //   i.e. ≈ one spurious "present" per ~0.7 ecosystem sweeps — which is exactly
-//   why a consumer at scale MUST add a confirm-on-connect step (the §6.2
-//   key-control challenge): a single bare `testMembership` hit is not proof of
+//   why a consumer at scale MUST add a confirm-on-connect step (the §7.2
+//   key-control-challenge recommendation): a single bare `testMembership` hit is not proof of
 //   presence, it is a CANDIDATE to confirm.
 //
 // We don't run a 100-sweep ecosystem here; we measure p DIRECTLY at smaller
@@ -33,7 +35,7 @@ import * as tesseraSurface from './index.js'
 // just arithmetic — documented, not re-simulated.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('accumulation budget (spec §7.6) — measured false-positive rate', () => {
+describe('accumulation budget (PROTOCOL.md §7.2) — measured false-positive rate', () => {
   // Keep the ceiling per the task spec. 16-bit ideal p ≈ 1.5e-5; the ceiling is
   // ~33× the ideal, comfortably absorbing sampling noise over ~1e5 trials while
   // still failing loudly if the filter's real FPR were anywhere near 1e-3+.
@@ -75,7 +77,7 @@ describe('accumulation budget (spec §7.6) — measured false-positive rate', ()
 
     const rate = falseHits / CANDIDATES
     // The measured false-hit rate must be near the 2^-16 ideal and under the
-    // §7.6 budget ceiling. (Do NOT loosen below 5e-4 — that would mask a broken
+    // §7.2 budget ceiling. (Do NOT loosen below 5e-4 — that would mask a broken
     // fingerprint.)
     expect(rate).toBeLessThan(FALSE_HIT_CEILING)
 
@@ -90,7 +92,7 @@ describe('accumulation budget (spec §7.6) — measured false-positive rate', ()
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Part A.2 — Non-enumerability sanity (spec §10.2)
+// Part A.2 — Non-enumerability sanity (SECURITY.md §2)
 //
 // HONEST SCOPE (read this before trusting the test name): "non-enumerable" is a
 // precise, NARROW claim, not "private."
@@ -101,7 +103,7 @@ describe('accumulation budget (spec §7.6) — measured false-positive rate', ()
 //   - NON-confirmable ❌ : a held SPECIFIC pubkey IS confirmable-present — that
 //     is literally what `testMembership` / `testWithCapability` DO. Keyed pools
 //     raise the bar from "anyone with a pubkey" to "salt-holders" (a speed-bump,
-//     §7.4), NOT to "members only." See SECURITY.md.
+//     SECURITY.md §1), NOT to "members only." See SECURITY.md.
 //
 // This is an ASSERTION/DOCUMENTATION test over the export surface, NOT a crypto
 // proof: it asserts the ABSENCE of any enumeration affordance and the SHAPE of
@@ -110,7 +112,7 @@ describe('accumulation budget (spec §7.6) — measured false-positive rate', ()
 // statistically by Part A.1 and argued in PROTOCOL.md.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('non-enumerability sanity (spec §10.2) — no member-listing affordance', () => {
+describe('non-enumerability sanity (SECURITY.md §2) — no member-listing affordance', () => {
   it('the public `.` export surface exposes no enumeration / member-listing function', () => {
     // The complete, intended public surface of the `.` entry. Anything outside
     // this set is unexpected and would warrant review — but crucially NONE of

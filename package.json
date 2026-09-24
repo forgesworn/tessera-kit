@@ -26,7 +26,8 @@
     "llms.txt",
     "README.md",
     "PROTOCOL.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "CONFORMANCE.md"
   ],
   "scripts": {
     "build": "tsc",

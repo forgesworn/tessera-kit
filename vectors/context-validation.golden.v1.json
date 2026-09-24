@@ -1,0 +1,59 @@
+{
+  "kind": "context-validation",
+  "description": "Reject + accept vectors for the signing-context validation codes (PROTOCOL.md §4.1) — review follow-up: reject.golden.v1.json only covers parseFilter (PARSE_*); this file covers signFilterBlob/verifyFilterBlob/verifyAndParseFilter's SIGN_CONTEXT_*/VERIFY_CONTEXT_* codes and the context-mismatch case. `unsignedBlobHex` is a real unsigned KFLT blob (padToBucket:false, 5 members from the documented tessera-vec rule); `signedBlobHex` is that same blob signed once under `validContext` by the frozen demo key (signerPrivHexDemoOnly / pinnedPubkeyHex) — used for every \"verify\"/\"verify-mismatch\" case so the shape-validation codes are exercised against a REAL signed blob, not a synthetic one. Each case's `side` selects how the checker drives it: \"sign\" re-signs a fresh copy of unsignedBlobHex under `context` and expects signFilterBlob to throw `expectedErrorCode`; \"accept\" signs+verifies a full round-trip under `context` and expects NO throw; \"verify\" calls verifyFilterBlob(signedBlobHex, context) and expects `expectedErrorCode` (context SHAPE errors fire before any digest comparison, so this is valid even though `context` differs from `validContext`); \"verify-mismatch\" calls verifyAndParseFilter(signedBlobHex, {pinnedPubkeyHex, context}) with a DIFFERENT but well-formed context and expects the single opaque VERIFY_SIGNATURE_OR_SIGNER_MISMATCH code (spec §4.3 security rule — never a distinguishable \"context mismatch\" code).",
+  "unsignedBlobHex": "4b464c540101100080e14e68000000006c6b66660800000001000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000900d00000000000000000000000000000000000013f60000000000000000000033d1000000000000000087a58641",
+  "signedBlobHex": "4b464c540101100080e14e68000000006c6b6666080000000100000008000000398a3b869d3ae3ce6517babee042280d05dfe8322a5ab35274c8f5c6eb45147b508d30bb5ed80237c9bfd0cf573c1430d61c0dfd596434fff102b3080c87f05b3d1198a083d81aef018d7bffb860665fe4aba8436112e8bd37d98c36826303660000900d00000000000000000000000000000000000013f60000000000000000000033d1000000000000000087a58641",
+  "signerPrivHexDemoOnly": "9b3172c032519a962bf9f6ad674e7b71d099bd10d04a0d209e23f1980f08d6c9",
+  "pinnedPubkeyHex": "398a3b869d3ae3ce6517babee042280d05dfe8322a5ab35274c8f5c6eb45147b",
+  "validContext": "tessera-vec:context-validation:v1",
+  "epoch": 1750000000,
+  "cases": [
+    {
+      "description": "sign: empty context",
+      "side": "sign",
+      "context": "",
+      "expectedErrorCode": "SIGN_CONTEXT_EMPTY"
+    },
+    {
+      "description": "sign: lone UTF-16 surrogate context",
+      "side": "sign",
+      "context": "a\ud800",
+      "expectedErrorCode": "SIGN_CONTEXT_NOT_WELL_FORMED"
+    },
+    {
+      "description": "sign: context UTF-8 encodes to 1025 bytes (over the 1024 limit)",
+      "side": "sign",
+      "context": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expectedErrorCode": "SIGN_CONTEXT_TOO_LONG"
+    },
+    {
+      "description": "accept: context UTF-8 encodes to EXACTLY 1024 bytes (at the limit, must be accepted)",
+      "side": "accept",
+      "context": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "description": "verify: empty context",
+      "side": "verify",
+      "context": "",
+      "expectedErrorCode": "VERIFY_CONTEXT_EMPTY"
+    },
+    {
+      "description": "verify: lone UTF-16 surrogate context",
+      "side": "verify",
+      "context": "a\ud800",
+      "expectedErrorCode": "VERIFY_CONTEXT_NOT_WELL_FORMED"
+    },
+    {
+      "description": "verify: context UTF-8 encodes to 1025 bytes (over the 1024 limit)",
+      "side": "verify",
+      "context": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expectedErrorCode": "VERIFY_CONTEXT_TOO_LONG"
+    },
+    {
+      "description": "verify-mismatch: well-formed but WRONG context must fail with the single opaque signature/signer/context code, never a distinguishable one",
+      "side": "verify-mismatch",
+      "context": "a-different-well-formed-context",
+      "expectedErrorCode": "VERIFY_SIGNATURE_OR_SIGNER_MISMATCH"
+    }
+  ]
+}

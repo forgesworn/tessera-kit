@@ -1,13 +1,14 @@
 // KFLT byte codec — serialize a `MembershipFilter` to / parse it from the
-// on-wire `KFLT` blob (spec §7.3, §7.6).
+// on-wire `KFLT` blob (spec §3, §3.1).
 //
 // HARDENING (parseFilter): this codec is the trust boundary for hostile input.
 // `parseFilter` validates the header EXHAUSTIVELY and recomputes the expected
 // blob length from header geometry BEFORE allocating anything sized by an
 // attacker-controlled field — a malformed blob can never trigger an unbounded
-// allocation or read past its own bounds. Every reachable failure throws an
-// `Error` (never a non-Error value), so callers can `try/catch (e instanceof
-// Error)` uniformly.
+// allocation or read past its own bounds. Every reachable failure throws a
+// `TesseraError` (a `PARSE_*`-coded `Error` subclass — see errors.ts), so
+// callers can `try/catch (e instanceof Error)` uniformly, or switch on
+// `e.code` for a specific reason (`e instanceof TesseraError`).
 //
 // SIGNATURE IS NOT VERIFIED HERE. `parseFilter` deserializes structure only and
 // leaves the signer_pubkey (off 32..64) and sig (off 64..128) regions opaque. A
@@ -25,6 +26,7 @@ import {
   KFLT_MAX_BLOB_BYTES,
   KFLT_VERSION,
 } from './types.js'
+import { TesseraError } from './errors.js'
 import type { MembershipFilter } from './types.js'
 
 // Field offsets (bytes). Matches the authoritative KFLT v1 header layout.
@@ -90,12 +92,18 @@ function isPowerOfTwo(n: number): boolean {
  *         `verifyFilterBlob`, TK-5) would reject anyway.
  */
 export function serializeFilter(f: MembershipFilter): Uint8Array {
+  // Follow-up review fix — a non-MembershipFilter `f` (null, a number, a
+  // plain object with no `_fuse`) previously reached `f._fuse.arrayLength`
+  // and threw a raw TypeError. Checked before any field access.
+  if (f === null || typeof f !== 'object' || !f._fuse) {
+    throw new TesseraError('CODEC_FILTER_TYPE', 'serializeFilter: f must be a MembershipFilter')
+  }
   const fuse = f._fuse
   const arrayLength = fuse.arrayLength
   const total = KFLT_HEADER_LEN + arrayLength * 2
 
   if (total > KFLT_MAX_BLOB_BYTES) {
-    throw new Error('serializeFilter: output would exceed KFLT_MAX_BLOB_BYTES')
+    throw new TesseraError('CODEC_BLOB_TOO_LARGE', 'serializeFilter: output would exceed KFLT_MAX_BLOB_BYTES')
   }
 
   const buf = new Uint8Array(total)
@@ -146,12 +154,19 @@ export function serializeFilter(f: MembershipFilter): Uint8Array {
  * "trustworthy bytes."
  */
 export function parseFilter(blob: Uint8Array): MembershipFilter {
+  // 0. Type guard (follow-up review fix) — a non-Uint8Array `blob` (null, a
+  //    number, a plain object) previously reached `blob.length` / indexed
+  //    access and threw a raw TypeError instead of a TesseraError. This is
+  //    checked BEFORE the bounds check below, which assumes `.length` exists.
+  if (!(blob instanceof Uint8Array)) {
+    throw new TesseraError('PARSE_BLOB_TYPE', 'parseFilter: blob must be a Uint8Array')
+  }
   // 1. Bounds: at least a full header, at most the hard cap.
   if (blob.length < KFLT_HEADER_LEN) {
-    throw new Error('KFLT: blob shorter than header')
+    throw new TesseraError('PARSE_BLOB_TOO_SHORT', 'KFLT: blob shorter than header')
   }
   if (blob.length > KFLT_MAX_BLOB_BYTES) {
-    throw new Error('KFLT: blob exceeds maximum size')
+    throw new TesseraError('PARSE_BLOB_TOO_LARGE', 'KFLT: blob exceeds maximum size')
   }
 
   const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength)
@@ -163,22 +178,22 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
     blob[OFF_MAGIC + 2] !== MAGIC_2 ||
     blob[OFF_MAGIC + 3] !== MAGIC_3
   ) {
-    throw new Error('KFLT: bad magic')
+    throw new TesseraError('PARSE_BAD_MAGIC', 'KFLT: bad magic')
   }
 
   // 3. Format version.
   const version = blob[OFF_VERSION] as number
   if (version !== KFLT_VERSION) {
-    throw new Error('KFLT: unsupported format version')
+    throw new TesseraError('PARSE_UNSUPPORTED_VERSION', 'KFLT: unsupported format version')
   }
 
   // 4. Filter type ∈ {1,2,3}; only fuse (1) implemented.
   const filterType = blob[OFF_FILTER_TYPE] as number
   if (filterType !== 1 && filterType !== 2 && filterType !== 3) {
-    throw new Error('KFLT: invalid filter type')
+    throw new TesseraError('PARSE_INVALID_FILTER_TYPE', 'KFLT: invalid filter type')
   }
   if (filterType !== 1) {
-    throw new Error('unsupported filter type')
+    throw new TesseraError('PARSE_UNSUPPORTED_FILTER_TYPE', 'unsupported filter type')
   }
 
   // 5. Fingerprint bits ∈ {8,16,20,32}; only 16 implemented.
@@ -189,10 +204,10 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
     fingerprintBits !== 20 &&
     fingerprintBits !== 32
   ) {
-    throw new Error('KFLT: invalid fingerprint bits')
+    throw new TesseraError('PARSE_INVALID_FINGERPRINT_BITS', 'KFLT: invalid fingerprint bits')
   }
   if (fingerprintBits !== 16) {
-    throw new Error('unsupported fingerprint bits')
+    throw new TesseraError('PARSE_UNSUPPORTED_FINGERPRINT_BITS', 'unsupported fingerprint bits')
   }
 
   // 6. Geometry. Read segment_length / segment_count and validate hard, then
@@ -201,13 +216,13 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
   const segmentCount = dv.getUint32(OFF_SEGMENT_COUNT, true)
 
   if (!isPowerOfTwo(segmentLength)) {
-    throw new Error('KFLT: segment_length not a power of two')
+    throw new TesseraError('PARSE_SEGMENT_LENGTH_NOT_POWER_OF_TWO', 'KFLT: segment_length not a power of two')
   }
   if (segmentLength < SEGMENT_LENGTH_MIN || segmentLength > SEGMENT_LENGTH_MAX) {
-    throw new Error('KFLT: segment_length out of range')
+    throw new TesseraError('PARSE_SEGMENT_LENGTH_OUT_OF_RANGE', 'KFLT: segment_length out of range')
   }
   if (segmentCount < 1) {
-    throw new Error('KFLT: segment_count must be >= 1')
+    throw new TesseraError('PARSE_SEGMENT_COUNT_INVALID', 'KFLT: segment_count must be >= 1')
   }
 
   // segmentCountLength and arrayLength must be safe integers. segment_count is a
@@ -220,7 +235,7 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
     !Number.isSafeInteger(segmentCountLength) ||
     !Number.isSafeInteger(arrayLength)
   ) {
-    throw new Error('KFLT: geometry overflow')
+    throw new TesseraError('PARSE_GEOMETRY_OVERFLOW', 'KFLT: geometry overflow')
   }
 
   // The fingerprint region alone must fit under the hard cap. Check BEFORE we
@@ -230,7 +245,7 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
     !Number.isSafeInteger(fingerprintBytes) ||
     OFF_FINGERPRINTS + fingerprintBytes > KFLT_MAX_BLOB_BYTES
   ) {
-    throw new Error('KFLT: declared array exceeds maximum size')
+    throw new TesseraError('PARSE_ARRAY_TOO_LARGE', 'KFLT: declared array exceeds maximum size')
   }
 
   // 7. Recompute expected blob length from header geometry; must match exactly.
@@ -238,7 +253,7 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
   //    geometry is rejected here, before the Uint16Array below is allocated.
   const expectedLen = OFF_FINGERPRINTS + fingerprintBytes
   if (expectedLen !== blob.length) {
-    throw new Error('KFLT: length mismatch')
+    throw new TesseraError('PARSE_LENGTH_MISMATCH', 'KFLT: length mismatch')
   }
 
   // Header scalars needed for the result. `epoch` is read as a BigInt FIRST and
@@ -248,7 +263,7 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
   // blob could claim one, so we reject it explicitly here rather than convert).
   const epochBig = dv.getBigUint64(OFF_EPOCH, true)
   if (epochBig > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error('KFLT: epoch exceeds Number.MAX_SAFE_INTEGER')
+    throw new TesseraError('PARSE_EPOCH_OVERFLOW', 'KFLT: epoch exceeds Number.MAX_SAFE_INTEGER')
   }
   const epoch = Number(epochBig)
   const seed = dv.getUint32(OFF_SEED, true)
@@ -257,7 +272,7 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
   // sets them; a blob that does is non-canonical input a future version could
   // misread differently, so we reject it now rather than silently ignore it).
   if ((flags & FLAGS_RESERVED_MASK) !== 0) {
-    throw new Error('KFLT: reserved flag bits set')
+    throw new TesseraError('PARSE_RESERVED_FLAGS_SET', 'KFLT: reserved flag bits set')
   }
   const memberCountBand = dv.getUint32(OFF_MEMBER_COUNT_BAND, true)
   // `member_count_band` is `nextPowerOfTwoBand(trueCount)` (padding.ts), which is
@@ -266,7 +281,7 @@ export function parseFilter(blob: Uint8Array): MembershipFilter {
   // whether padding was applied). A non-power-of-two value is therefore
   // non-canonical input, never something the builder emits (audit fix).
   if (!isPowerOfTwo(memberCountBand)) {
-    throw new Error('KFLT: member_count_band not a power of two')
+    throw new TesseraError('PARSE_MEMBER_COUNT_BAND_INVALID', 'KFLT: member_count_band not a power of two')
   }
 
   // 8. ONLY NOW allocate and read the fingerprint array (LE u16 × arrayLength).

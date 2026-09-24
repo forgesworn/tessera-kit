@@ -1,5 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex, hexToBytes, concatBytes } from '@noble/hashes/utils.js'
+import { TesseraError } from './errors.js'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const NONEMPTY_HEX = /^[0-9a-f]+$/
@@ -26,11 +27,18 @@ export function isValidSaltHex(s: string): boolean {
  * different from passing one that grants no protection. To build an OPEN
  * pool, omit `saltHex` entirely — do not pass `''`. */
 export function memberKey(pubkeyHex: string, saltHex?: string): string {
+  // Follow-up review fix — `.toLowerCase()` on a non-string previously threw
+  // a raw TypeError before the HEX64 shape check ever ran.
+  if (typeof pubkeyHex !== 'string') {
+    throw new TesseraError('INPUT_PUBKEY_TYPE', 'memberKey: pubkeyHex must be a string')
+  }
   const pk = pubkeyHex.toLowerCase()
-  if (!HEX64.test(pk)) throw new Error('memberKey: pubkey must be 64 lowercase hex chars')
+  if (!HEX64.test(pk)) {
+    throw new TesseraError('INPUT_PUBKEY_INVALID', 'memberKey: pubkey must be 64 lowercase hex chars')
+  }
   if (saltHex === undefined) return pk
   if (!isValidSaltHex(saltHex)) {
-    throw new Error('memberKey: salt must be non-empty even-length hex')
+    throw new TesseraError('INPUT_SALT_INVALID', 'memberKey: salt must be non-empty even-length hex')
   }
   const salt = saltHex.toLowerCase()
   return bytesToHex(sha256(concatBytes(hexToBytes(salt), hexToBytes(pk))))

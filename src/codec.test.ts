@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import fc from 'fast-check'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { buildMembershipFilter, testMembership } from './filter.js'
@@ -6,6 +7,7 @@ import { memberKey } from './member-key.js'
 import { serializeFilter, parseFilter } from './codec.js'
 import { KFLT_HEADER_LEN, KFLT_MAX_BLOB_BYTES } from './types.js'
 import type { MembershipFilter } from './types.js'
+import { TesseraError } from './errors.js'
 
 // Deterministic distinct 64-hex pubkeys (same style as filter.test.ts).
 const pubkeys = (n: number, tag = 7): string[] =>
@@ -398,5 +400,263 @@ describe('parseFilter — fuzz (never throws non-Error, never hangs/over-allocat
         expect(ok).toBeDefined()
       }
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Additive (post-0.2.0, item 12 of the gap survey; STRENGTHENED after an
+// independent review found the first pass too weak — see below) — fast-check
+// fuzzing of `parseFilter`, the hostile-input trust boundary (§3.1),
+// asserting the STRICT `instanceof TesseraError` — not merely `instanceof
+// Error` — on every reachable failure, per errors.ts's "nothing but a
+// TesseraError escapes a public function" rule.
+//
+// WHY THE FIRST PASS WAS TOO WEAK (independent review finding): fully random
+// bytes almost never get past the magic-bytes check (step 2, §3.1), and a
+// random truncation of a real blob almost never leaves the declared/actual
+// length consistent (step 7) — so both of the original properties spent
+// nearly all their runs bailing out at steps 1-2/6-7 and essentially never
+// exercised the checks that run LATER: epoch overflow (step 8), reserved
+// flags (step 9), member_count_band validity (step 10). Concretely, the
+// reviewer swapped `PARSE_MEMBER_COUNT_BAND_INVALID`, `PARSE_RESERVED_FLAGS_SET`,
+// and `PARSE_SEGMENT_COUNT_INVALID` for plain `RangeError`s in codec.ts and the
+// fuzz still passed 3/3 — it was structurally incapable of reaching (or of
+// noticing the wrong exception TYPE at) those sites.
+//
+// THE FIX: mutate a REAL blob's individual header fields directly, by literal
+// offset (mirroring PROTOCOL.md §3's table — the same offsets the hand-written
+// hardening tests above poke), with a mix of BOUNDARY and RANDOM values.
+//
+// A SECOND, SUBTLER version of the same weakness turned up while validating
+// THIS fix: an earlier draft mutated all 9 header fields independently in
+// EVERY run (each one a coin-flip of "touch it or not"). `parseFilter`
+// checks `version`/`filter_type`/`fingerprint_bits` (steps 3-5) BEFORE
+// `segment_count`/reserved-`flags`/`member_count_band` (steps 6/9/10) — so
+// whenever version/filterType/fingerprintBits ALSO happened to be mutated
+// invalid in the same run (independently likely, since each is its own
+// coin-flip), the run threw at the EARLY check and never reached the LATE
+// one at all. Multiply 3-4 independent "maybe invalid" fields together and
+// the probability of ever reaching a deep check collapses combinatorially —
+// this was verified empirically (a run-instrumented count showed the
+// PARSE_SEGMENT_COUNT_INVALID line was reached only ~1 time in ~1000, not
+// the ~1-in-30 a naive per-field estimate suggested, because most of THOSE
+// reaching runs still had an unrelated field also broken upstream).
+//
+// THE FIX FOR THAT: mutate ONE field at a time (`primary`) in the large
+// majority of runs — every OTHER field then keeps the base blob's own
+// already-valid value, so `primary`'s specific check is what actually
+// decides the outcome — with a rare (~5%) SECOND, independent mutation
+// (`secondary`) to still exercise field INTERACTIONS (e.g. flags mutated
+// together with a geometry resize) without making every single-field check
+// combinatorially rare. Geometry fields (`segment_length`/`segment_count`)
+// additionally get an explicit choice of whether to "fix up" the actual
+// buffer length to match the new declared geometry (reaching the checks
+// that run AFTER the length-match step) or leave it mismatched (exercising
+// that path directly) — see `fixupLength` below.
+//
+// `numRuns` is FIXED (not `interruptAfterTimeLimit`, which stops the run
+// silently on a slow machine and reports whatever ran so far as a pass,
+// rather than failing loudly) — this fuzz test either runs its full,
+// deterministic-count corpus and reports on that, or it fails; there is no
+// ambient wall-clock ceiling to silently under-run. Measured well under 5s.
+//
+// PROVEN (see the coordinator/reviewer's mutation-check requirement): with
+// this design, temporarily swapping `PARSE_SEGMENT_COUNT_INVALID`,
+// `PARSE_RESERVED_FLAGS_SET`, `PARSE_MEMBER_COUNT_BAND_INVALID`, and
+// `PARSE_EPOCH_OVERFLOW` (4 codes, 3 requested + 1 more) for a plain
+// `RangeError`, one at a time, in codec.ts made THIS test fail every time —
+// restored exactly afterwards (`git diff src/codec.ts` empty). Not
+// re-asserted automatically on every run (that would mean shipping the bug
+// on purpose); this comment records that it was checked.
+// ---------------------------------------------------------------------------
+
+describe('parseFilter — structure-aware fast-check fuzz (item 12, strengthened per independent review)', () => {
+  // Wire-layout offsets, mirrored from PROTOCOL.md §3's header table (the
+  // same offsets the hand-written hardening tests above poke directly) — not
+  // re-exported from codec.ts, since these are fixed WIRE positions, not part
+  // of codec.ts's own module contract.
+  const OFF_VERSION = 4
+  const OFF_FILTER_TYPE = 5
+  const OFF_FINGERPRINT_BITS = 6
+  const OFF_FLAGS = 7
+  const OFF_EPOCH_HI = 12 // high 32 bits of the LE64 `epoch` field at offset 8
+  const OFF_SEED = 16
+  const OFF_SEGMENT_LENGTH = 20
+  const OFF_SEGMENT_COUNT = 24
+  const OFF_MEMBER_COUNT_BAND = 28
+  const ARITY_MINUS_ONE = 2 // mirrors codec.ts's own constant — arrayLength = (segmentCount+2)*segmentLength
+  const MAX_TEST_ARRAY_LEN = 20_000 // cap the FIXED-UP geometry's size so mutated blobs stay small/fast (the real cap is 64 MiB)
+
+  type MutableField =
+    | 'version'
+    | 'filterType'
+    | 'fingerprintBits'
+    | 'flags'
+    | 'epochHi'
+    | 'seed'
+    | 'segmentLength'
+    | 'segmentCount'
+    | 'memberCountBand'
+
+  // Byte-sized fields vs. u32-sized fields — kept as two groups so each gets
+  // its own value arbitrary (a byte's boundary set is meaningless for a u32
+  // field and vice versa).
+  const BYTE_FIELDS: readonly MutableField[] = ['version', 'filterType', 'fingerprintBits', 'flags']
+  const WIDE_FIELDS: readonly MutableField[] = [
+    'epochHi',
+    'seed',
+    'segmentLength',
+    'segmentCount',
+    'memberCountBand',
+  ]
+  const FIELD_OFFSETS: Record<MutableField, number> = {
+    version: OFF_VERSION,
+    filterType: OFF_FILTER_TYPE,
+    fingerprintBits: OFF_FINGERPRINT_BITS,
+    flags: OFF_FLAGS,
+    epochHi: OFF_EPOCH_HI,
+    seed: OFF_SEED,
+    segmentLength: OFF_SEGMENT_LENGTH,
+    segmentCount: OFF_SEGMENT_COUNT,
+    memberCountBand: OFF_MEMBER_COUNT_BAND,
+  }
+  const BYTE_FIELD_SET = new Set(BYTE_FIELDS)
+
+  // Real blobs at varied sizes — n=0 exercises the §2.4 degenerate-geometry
+  // guard specifically — so mutations land on different STARTING geometries,
+  // not just one.
+  const baseBlobs = [0, 1, 5, 64, 500].map((n) => serializeFilter(openFilter(n, 300 + n).f))
+
+  // Boundary values deliberately include ones that ARE valid (e.g. a power
+  // of two for segment_length, or exactly 16 for fingerprint_bits) and ones
+  // that are NOT (e.g. 3, 5, 0xfc) — the point is to land ON the edges of
+  // every check in §3.1, not just inside or outside them.
+  const boundaryU32 = [0, 1, 2, 3, 4, 5, (1 << 18) - 1, 1 << 18, (1 << 18) + 1, 0x7fffffff, 0xffffffff]
+  const u32Arb = fc.oneof(fc.constantFrom(...boundaryU32), fc.nat({ max: 0xffffffff }))
+  const boundaryByte = [0, 1, 2, 3, 4, 7, 8, 15, 16, 20, 32, 0xfc, 0xff]
+  const byteArb = fc.oneof(fc.constantFrom(...boundaryByte), fc.nat({ max: 255 }))
+
+  // One mutation = (which field, what value). Byte and wide fields draw from
+  // their own value arbitrary; `applyMutation` below masks appropriately.
+  const mutationArb = fc.oneof(
+    fc.tuple(fc.constantFrom(...BYTE_FIELDS), byteArb),
+    fc.tuple(fc.constantFrom(...WIDE_FIELDS), u32Arb),
+  )
+
+  function writeU32(buf: Uint8Array, offset: number, value: number): void {
+    new DataView(buf.buffer, buf.byteOffset, buf.byteLength).setUint32(offset, value >>> 0, true)
+  }
+  function readU32(buf: Uint8Array, offset: number): number {
+    return new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint32(offset, true)
+  }
+  function applyMutation(buf: Uint8Array, field: MutableField, value: number): void {
+    if (BYTE_FIELD_SET.has(field)) {
+      buf[FIELD_OFFSETS[field]] = value & 0xff
+    } else {
+      writeU32(buf, FIELD_OFFSETS[field], value)
+    }
+  }
+
+  it('mutating ONE header field at a time (boundary + random values, rare 2-field combos), fingerprint bytes, and length-consistent/inconsistent resizes: parseFilter either returns a well-shaped MembershipFilter or throws a TesseraError', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: baseBlobs.length - 1 }),
+        // `primary`: ~90% of runs mutate exactly one field; ~10% mutate none
+        // (pure fingerprint-flip/resize/baseline runs — still useful).
+        fc.oneof({ weight: 1, arbitrary: fc.constant(undefined) }, { weight: 9, arbitrary: mutationArb }),
+        // `secondary`: an additional, independent mutation in ~5% of runs —
+        // rare on purpose, so it tests INTERACTIONS without drowning out the
+        // single-field cases every specific check depends on to be reached.
+        fc.oneof({ weight: 19, arbitrary: fc.constant(undefined) }, { weight: 1, arbitrary: mutationArb }),
+        fc.array(fc.tuple(fc.nat({ max: 4095 }), fc.integer({ min: 1, max: 255 })), { maxLength: 6 }),
+        fc.boolean(), // fixupLength — see the module note above
+        (baseIndex, primary, secondary, fingerprintFlips, fixupLength) => {
+          const base = baseBlobs[baseIndex] as Uint8Array
+          let buf = base.slice()
+
+          // 1. Apply the byte-sized-field mutations (version/filterType/
+          //    fingerprintBits/flags) directly — none of these change the
+          //    DECLARED length, so they're independent of the resize step.
+          //    Apply the wide, non-geometry fields (epochHi/seed/
+          //    memberCountBand) directly too, for the same reason.
+          const mutations = [primary, secondary].filter((m): m is [MutableField, number] => m !== undefined)
+          const touchedGeometry = mutations.some(([f]) => f === 'segmentLength' || f === 'segmentCount')
+          for (const [field, value] of mutations) {
+            if (field !== 'segmentLength' && field !== 'segmentCount') applyMutation(buf, field, value)
+          }
+
+          // 2. Geometry fields (segmentLength/segmentCount) DO change the
+          //    declared length. Apply them, then either fix the ACTUAL
+          //    buffer length up to match the new declared geometry (so a
+          //    run that ALSO mutated flags/band/epoch — via `secondary` —
+          //    still reaches those checks, which run AFTER the length-match
+          //    step, §3.1 steps 8-10) or deliberately leave the mismatch in
+          //    place (exercising length-mismatch/overflow/array-too-large
+          //    instead, steps 6-7).
+          for (const [field, value] of mutations) {
+            if (field === 'segmentLength' || field === 'segmentCount') applyMutation(buf, field, value)
+          }
+
+          if (touchedGeometry && fixupLength) {
+            const segmentLength = readU32(buf, OFF_SEGMENT_LENGTH)
+            const segmentCount = readU32(buf, OFF_SEGMENT_COUNT)
+            const arrayLength = (segmentCount + ARITY_MINUS_ONE) * segmentLength
+            // Only fix up when the resulting size is small and safe — a huge
+            // or non-finite arrayLength is left AS-IS, which still exercises
+            // a real rejection path (geometry overflow / array-too-large).
+            if (Number.isSafeInteger(arrayLength) && arrayLength >= 0 && arrayLength <= MAX_TEST_ARRAY_LEN) {
+              const newTotal = KFLT_HEADER_LEN + arrayLength * 2
+              const resized = new Uint8Array(newTotal)
+              resized.set(buf.subarray(0, Math.min(buf.length, newTotal)))
+              buf = resized
+            }
+          }
+
+          // 3. Fingerprint-byte flips, applied last, always within the
+          //    CURRENT buffer's fingerprint region — these never themselves
+          //    change the declared/actual length relationship.
+          for (const [posMod, xorByte] of fingerprintFlips) {
+            const region = buf.length - KFLT_HEADER_LEN
+            if (region > 0) {
+              const pos = KFLT_HEADER_LEN + (posMod % region)
+              buf[pos] = ((buf[pos] as number) ^ xorByte) & 0xff
+            }
+          }
+
+          try {
+            const result = parseFilter(buf)
+            // A successful parse must be a structurally-valid MembershipFilter.
+            expect(result.type).toBe(1)
+            expect(result.fingerprintBits).toBe(16)
+            expect(result._fuse.fingerprints.length).toBe(result._fuse.arrayLength)
+          } catch (e) {
+            expect(e).toBeInstanceOf(TesseraError)
+          }
+        },
+      ),
+      { numRuns: 8000 },
+    )
+  })
+
+  // Retained (weakened but not wrong) light coverage of the outer shell —
+  // the case a fully-random-bytes fuzz is actually good at: proving the
+  // very-first checks (bounds/magic) never let anything but a TesseraError
+  // or a well-shaped result through, over inputs with NO structural
+  // relationship to a valid blob at all. The structure-aware property above
+  // is what reaches the checks this one almost never does.
+  it('fully random bytes of arbitrary length: parseFilter either returns a well-shaped MembershipFilter or throws a TesseraError, never anything else', () => {
+    fc.assert(
+      fc.property(fc.uint8Array({ minLength: 0, maxLength: 2048 }), (bytes) => {
+        try {
+          const result = parseFilter(bytes)
+          expect(result.type).toBe(1)
+          expect(result.fingerprintBits).toBe(16)
+          expect(result._fuse.fingerprints.length).toBe(result._fuse.arrayLength)
+        } catch (e) {
+          expect(e).toBeInstanceOf(TesseraError)
+        }
+      }),
+      { numRuns: 500 },
+    )
   })
 })

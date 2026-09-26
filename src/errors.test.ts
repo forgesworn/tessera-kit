@@ -25,7 +25,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 
 import { TesseraError } from './errors.js'
 import type { TesseraErrorCode } from './errors.js'
-import { buildMembershipFilter, testMembership } from './filter.js'
+import { buildMembershipFilter, testMembership, testMany, describeFilter } from './filter.js'
 import { memberKey } from './member-key.js'
 import { serializeFilter, parseFilter } from './codec.js'
 import { signFilterBlob, verifyFilterBlob, verifyAndParseFilter } from './sign.js'
@@ -257,6 +257,39 @@ describe('TesseraErrorCode reachability — VERIFY_*', () => {
           minEpoch: EPOCH + 1,
         }),
       'VERIFY_STALE_EPOCH',
+    )
+  })
+
+  // Additive (post-0.2.0) — opts.strictlyNewerThan, the opt-in strict epoch
+  // check that closes the same-epoch-replay gap minEpoch's `<` comparison
+  // leaves open. See sign.ts's doc comment and PROTOCOL.md §4.3.
+  it('VERIFY_STRICTLY_NEWER_THAN_INVALID', () => {
+    const SERVER = keypairFromSeed(76)
+    const { blob } = openFilterBlob(10, 76)
+    signFilterBlob(blob, SERVER.privHex, CTX)
+    expectCode(
+      () =>
+        verifyAndParseFilter(blob, {
+          pinnedPubkeyHex: SERVER.pubHex,
+          context: CTX,
+          strictlyNewerThan: Number.NaN,
+        }),
+      'VERIFY_STRICTLY_NEWER_THAN_INVALID',
+    )
+  })
+
+  it('VERIFY_EPOCH_NOT_NEWER — parsed epoch equal to strictlyNewerThan (same-epoch replay)', () => {
+    const SERVER = keypairFromSeed(77)
+    const { blob } = openFilterBlob(10, 77)
+    signFilterBlob(blob, SERVER.privHex, CTX)
+    expectCode(
+      () =>
+        verifyAndParseFilter(blob, {
+          pinnedPubkeyHex: SERVER.pubHex,
+          context: CTX,
+          strictlyNewerThan: EPOCH,
+        }),
+      'VERIFY_EPOCH_NOT_NEWER',
     )
   })
 
@@ -635,6 +668,35 @@ describe('TesseraErrorCode reachability — TEST_*', () => {
     expectCode(() => testMembership(42 as unknown as MembershipFilter, 'a'.repeat(64)), 'TEST_FILTER_TYPE')
     expectCode(() => testMembership({} as unknown as MembershipFilter, 'a'.repeat(64)), 'TEST_FILTER_TYPE')
   })
+
+  // Additive (post-0.2.0) — testMany reuses TEST_FILTER_TYPE/TEST_VALUE_INVALID
+  // and introduces exactly one new code, TEST_VALUES_TYPE, for a non-array
+  // `valuesHex`. See filter.ts's doc comment.
+  it('TEST_FILTER_TYPE — testMany(f, ...) with f not a MembershipFilter-shaped object', () => {
+    expectCode(() => testMany(null as unknown as MembershipFilter, []), 'TEST_FILTER_TYPE')
+    expectCode(() => testMany(42 as unknown as MembershipFilter, []), 'TEST_FILTER_TYPE')
+  })
+
+  it('TEST_VALUES_TYPE — testMany(..., valuesHex) with valuesHex not an array', () => {
+    const { blob } = openFilterBlob(10, 78)
+    const parsed = parseFilter(blob)
+    expectCode(() => testMany(parsed, null as unknown as string[]), 'TEST_VALUES_TYPE')
+    expectCode(() => testMany(parsed, 'not-an-array' as unknown as string[]), 'TEST_VALUES_TYPE')
+  })
+
+  it('TEST_VALUE_INVALID — testMany(..., valuesHex) with a bad element', () => {
+    const { blob } = openFilterBlob(10, 79)
+    const parsed = parseFilter(blob)
+    expectCode(() => testMany(parsed, ['not-hex']), 'TEST_VALUE_INVALID')
+  })
+
+  // describeFilter reuses TEST_FILTER_TYPE too — the same "f must be a
+  // MembershipFilter" check every function in filter.ts shares.
+  it('TEST_FILTER_TYPE — describeFilter(f) with f not a MembershipFilter-shaped object', () => {
+    expectCode(() => describeFilter(null as unknown as MembershipFilter), 'TEST_FILTER_TYPE')
+    expectCode(() => describeFilter(42 as unknown as MembershipFilter), 'TEST_FILTER_TYPE')
+    expectCode(() => describeFilter({} as unknown as MembershipFilter), 'TEST_FILTER_TYPE')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -788,6 +850,9 @@ describe('every exported function rejects null/number without leaking a raw erro
     ['buildMembershipFilter(ok, bad)', (bad) => buildMembershipFilter([], bad as { epoch: number })],
     ['testMembership(bad, ok)', (bad) => testMembership(bad as MembershipFilter, 'a'.repeat(64))],
     ['testMembership(ok, bad)', (bad) => testMembership(okFilter, bad as string)],
+    ['testMany(bad, ok)', (bad) => testMany(bad as MembershipFilter, ['a'.repeat(64)])],
+    ['testMany(ok, bad)', (bad) => testMany(okFilter, bad as string[])],
+    ['describeFilter(bad)', (bad) => describeFilter(bad as MembershipFilter)],
     ['serializeFilter(bad)', (bad) => serializeFilter(bad as MembershipFilter)],
     ['parseFilter(bad)', (bad) => parseFilter(bad as Uint8Array)],
     ['signFilterBlob(bad, ok, ok)', (bad) => signFilterBlob(bad as Uint8Array, okKeypair.privHex, CTX)],

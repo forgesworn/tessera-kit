@@ -493,17 +493,39 @@ export function verifyFilterBlob(
  *                         every `epoch` and accepting a stale blob (audit fix:
  *                         `filter.epoch < NaN` is always `false`, the same
  *                         footgun `testWithCapability`'s expiry check had — B5).
+ * @param opts.strictlyNewerThan optional, ADDITIVE (post-0.2.0) — a stricter
+ *                         sibling of `minEpoch`. `minEpoch`'s `epoch <
+ *                         minEpoch` comparison is deliberately non-strict: an
+ *                         EQUAL epoch always passes `minEpoch` (see
+ *                         PROTOCOL.md §4.3's "same-epoch replay" note) — a
+ *                         validly-signed blob for an already-seen epoch is not
+ *                         itself a rollback, so `minEpoch` lets it through by
+ *                         design. A caller who additionally needs "this MUST
+ *                         be a genuinely NEWER epoch than the last one I
+ *                         accepted, not just as new" opts into `strictlyNewerThan`:
+ *                         the parsed `epoch` MUST be `> strictlyNewerThan`, or
+ *                         this throws `VERIFY_EPOCH_NOT_NEWER`. Validated the
+ *                         SAME way as `minEpoch` (non-negative safe integer;
+ *                         a malformed value throws `VERIFY_STRICTLY_NEWER_THAN_INVALID`
+ *                         rather than silently comparing false). Checked
+ *                         AFTER the signature check, same as `minEpoch`, and
+ *                         independently of it — passing both is fine (see
+ *                         sign.test.ts). `minEpoch`'s own behaviour is
+ *                         completely unchanged: this is a purely additive,
+ *                         opt-in tightening, never applied unless requested.
  * @returns the parsed `MembershipFilter` — only on success.
  * @throws if `pinnedPubkeyHex` is not 64 hex chars, `context` is malformed,
- *         `minEpoch` is given but not a non-negative safe integer, the
- *         signature is invalid, the signer doesn't match `pinnedPubkeyHex`,
- *         the context doesn't match (all THREE of these share one generic
- *         message — see above), the blob fails to parse (malformed
- *         structure), or the parsed `epoch` is older than `minEpoch`.
+ *         `minEpoch` or `strictlyNewerThan` is given but not a non-negative
+ *         safe integer, the signature is invalid, the signer doesn't match
+ *         `pinnedPubkeyHex`, the context doesn't match (all THREE of these
+ *         share one generic message — see above), the blob fails to parse
+ *         (malformed structure), the parsed `epoch` is older than `minEpoch`,
+ *         or (if `strictlyNewerThan` is given) the parsed `epoch` is not
+ *         strictly greater than it.
  */
 export function verifyAndParseFilter(
   blob: Uint8Array,
-  opts: { pinnedPubkeyHex: string; context: string; minEpoch?: number },
+  opts: { pinnedPubkeyHex: string; context: string; minEpoch?: number; strictlyNewerThan?: number },
 ): MembershipFilter {
   // Type guard (follow-up review fix) — a non-object `opts` (null, a number)
   // previously reached `opts.pinnedPubkeyHex` and threw a raw TypeError.
@@ -526,6 +548,19 @@ export function verifyAndParseFilter(
       'verifyAndParseFilter: minEpoch must be a non-negative safe integer',
     )
   }
+  // `opts.strictlyNewerThan` (additive) — validated the SAME way as `minEpoch`
+  // above, own code (see this option's doc comment above). The actual
+  // strictly-newer COMPARISON happens below, after the signature check, same
+  // as minEpoch's staleness check.
+  if (
+    opts.strictlyNewerThan !== undefined &&
+    (!Number.isSafeInteger(opts.strictlyNewerThan) || opts.strictlyNewerThan < 0)
+  ) {
+    throw new TesseraError(
+      'VERIFY_STRICTLY_NEWER_THAN_INVALID',
+      'verifyAndParseFilter: strictlyNewerThan must be a non-negative safe integer',
+    )
+  }
   // `context`'s SHAPE is validated by `verifyFilterBlob` (via `assertContext`)
   // below — a malformed context throws its own distinct usage error there, the
   // same as the checks above. A WRONG-but-well-formed context is not
@@ -544,6 +579,18 @@ export function verifyAndParseFilter(
     throw new TesseraError(
       'VERIFY_STALE_EPOCH',
       'verifyAndParseFilter: filter epoch is older than minEpoch (stale/rollback)',
+    )
+  }
+  // `opts.strictlyNewerThan` (additive) — checked AFTER the signature check
+  // and AFTER minEpoch's own check, same position minEpoch's staleness check
+  // occupies. Non-strict `<=` fails here (so an EQUAL epoch — the case
+  // `minEpoch` alone lets through — is rejected too), closing the
+  // same-epoch-replay gap for a caller who opts in. See this option's doc
+  // comment above and PROTOCOL.md §4.3.
+  if (opts.strictlyNewerThan !== undefined && filter.epoch <= opts.strictlyNewerThan) {
+    throw new TesseraError(
+      'VERIFY_EPOCH_NOT_NEWER',
+      'verifyAndParseFilter: filter epoch is not strictly newer than strictlyNewerThan',
     )
   }
   return filter

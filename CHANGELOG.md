@@ -4,6 +4,58 @@ All notable changes to `@forgesworn/tessera-kit` are documented here. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Purely additive since 0.2.0 — no existing exported function, type, error
+code, wire format, vector, or default behaviour changes. Existing tests and
+vectors pass unmodified.
+
+### Added
+
+- `describeFilter(f)` (`.`) — a plain, readonly public view of a
+  `MembershipFilter`'s metadata (`fingerprintBits`, `filterType`, `keyed`,
+  `padded`, `epoch`, `memberCountBand`, `segmentLength`, `segmentCount`,
+  `arrayLength`, `byteLength`, `theoreticalFalsePositiveRate`), and the
+  `FilterDescription` type. Reveals nothing beyond what the serialized `KFLT`
+  header already discloses (PROTOCOL.md §10).
+- `testMany(f, valuesHex)` (`.`) — test many values against a filter in one
+  call, with the exact same validation and semantics as calling
+  `testMembership` on each value (PROTOCOL.md §10).
+- `verifyAndParseFilter`'s `opts.strictlyNewerThan` — an opt-in, stricter
+  sibling of `minEpoch` that rejects a parsed filter whose `epoch` is not
+  *strictly* greater than the given value, closing the same-epoch-replay gap
+  `minEpoch`'s non-strict `<` comparison leaves open for a caller who opts in
+  (PROTOCOL.md §4.3). `minEpoch`'s own behaviour is unchanged.
+- New `TesseraErrorCode` values: `TEST_VALUES_TYPE` (`testMany`'s
+  non-array `valuesHex`), `VERIFY_STRICTLY_NEWER_THAN_INVALID` and
+  `VERIFY_EPOCH_NOT_NEWER` (`opts.strictlyNewerThan`'s validation and
+  freshness-check failures).
+- PROTOCOL.md §10 ("Introspection & bulk-test helpers") and §11 ("Evolution /
+  versioning") — new sections; `CONFORMANCE.md` links §11.
+- Dev tooling: `fast-check` property tests (build→serialize→parse round-trip
+  and byte-identical re-serialization over random member sets sized 0–2000;
+  `testMany` vs. the equivalent `testMembership` loop) and a structure-aware
+  fast-check fuzz test for `parseFilter` that mutates individual header
+  fields (boundary + random values), fingerprint bytes, and geometry-driven
+  resizes, asserting every failure is a `TesseraError`; `@vitest/coverage-v8`
+  and a `test:coverage` script (reporting only, no CI-failing thresholds); a
+  `bench` script (`scripts/bench.mjs`, not run in CI or `npm test`) timing
+  build/test/testMany/parse/sign/verify at 1k/100k/1M members.
+- PROTOCOL.md corrections from an independent review of this pass: §11's
+  "how a verifier rejects an unknown version" now distinguishes `parseFilter`
+  (rejects at `PARSE_UNSUPPORTED_VERSION`, after bounds/magic) from
+  `verifyAndParseFilter` (rejects almost all such blobs earlier, at
+  `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH`, since `verifyFilterBlob` never
+  inspects `format_version`); §4.3 now states plainly that this kit does not
+  enforce "one content per epoch," and gives usage guidance for
+  `strictlyNewerThan` (an ordinary re-fetch of the current epoch throws
+  `VERIFY_EPOCH_NOT_NEWER` — treat that as "no update," or use `minEpoch`
+  for re-fetches instead); §9 and the `TesseraErrorCode` JSDoc now state the
+  minor-vs-major stability policy explicitly (existing codes are fixed within
+  a major version, new codes may be added in a minor one — don't write an
+  exhaustive `switch`/`Record` over the union without a fallback).
+- CI now runs the test matrix on Node 22 and 24 (was 22 only).
+
 ## [0.2.0] — 2026-09-25
 
 A post-audit hardening pass over 0.1.0, a second review pass that closed gaps

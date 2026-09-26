@@ -60,10 +60,26 @@
 // information as a message-based one did: "this blob is not trustworthy,"
 // nothing about WHY, so probing `code` cannot leak which check failed either.
 //
-// STABILITY. This table is documented as a stable contract in PROTOCOL.md
+// STABILITY. This table is documented as a stable contract in PROTOCOL.md §9
 // (linked from here) — a future removal or renaming of a `TesseraErrorCode`
-// value is a breaking change, the same as removing an exported function
-// would be. Adding a NEW code for a NEW failure mode is not breaking.
+// value, OR a change to what an EXISTING code means, is a breaking change,
+// the same as removing or repurposing an exported function would be, and
+// will not happen within a major version. Adding a NEW code for a NEW
+// failure mode is NOT breaking and MAY happen in a MINOR release — this pass
+// itself added three (`TEST_VALUES_TYPE`, `VERIFY_STRICTLY_NEWER_THAN_INVALID`,
+// `VERIFY_EPOCH_NOT_NEWER`) without bumping a major version, because they are
+// new failure modes from new, additive functionality, not a change to any
+// existing code's meaning.
+//
+// CONSEQUENCE FOR CONSUMERS (PROTOCOL.md §9 states this too): do NOT write an
+// exhaustive `switch (code) { case 'A': ...; case 'B': ... }` with no
+// `default`, and do NOT write a `Record<TesseraErrorCode, X>` object literal
+// — TypeScript accepts either against TODAY's union, but a future MINOR
+// release that adds one more code (which this contract explicitly permits)
+// silently falls through an exhaustiveness-less `switch` at runtime, or fails
+// to type-check a `Record` literal that must cover every member. Always
+// include a `default` / trailing `else` that handles "a code I don't
+// specifically recognise" as its own case.
 //
 // EXPORTED FROM: the main entry (`.`) and from each subpath whose errors
 // originate there (`./capability`, `./nostr`) — see those files' re-exports.
@@ -74,6 +90,12 @@
  * per distinct throw site's MEANING — two call sites that throw the exact
  * same message for the exact same reason (e.g. `capability.ts`'s
  * `subjectPubHex` shape checks, shared by issue and test) share ONE code.
+ *
+ * STABILITY (see the module note above for the full policy): an existing
+ * member's meaning is fixed for the life of a major version; new members MAY
+ * be added in a minor release. Consumers should not treat this union as
+ * exhaustive-and-closed — code that switches on `TesseraErrorCode` should
+ * always have a `default`/`else` fallback for a code it does not recognise.
  */
 export type TesseraErrorCode =
   // --- PARSE_* — codec.ts, parseFilter (the hostile-input trust boundary) ---
@@ -119,6 +141,14 @@ export type TesseraErrorCode =
   | 'VERIFY_STALE_EPOCH'
   | 'VERIFY_BLOB_TYPE'
   | 'VERIFY_OPTS_TYPE'
+  // `opts.strictlyNewerThan` (additive, opt-in) — same validation SHAPE as
+  // `minEpoch` above (own code, non-negative safe integer), and its own
+  // distinct failure code for "not strictly newer," mirroring the
+  // `VERIFY_MIN_EPOCH_INVALID` / `VERIFY_STALE_EPOCH` pair. Closes the
+  // same-epoch-replay gap `minEpoch`'s `<` (not `<=`) comparison leaves open,
+  // for a caller who opts in — see sign.ts's doc comment and PROTOCOL.md §4.3.
+  | 'VERIFY_STRICTLY_NEWER_THAN_INVALID'
+  | 'VERIFY_EPOCH_NOT_NEWER'
   // --- CAPABILITY_* — capability.ts ---
   | 'CAPABILITY_EXPIRES_AT_INVALID'
   | 'CAPABILITY_SERVER_ID_EMPTY'
@@ -152,9 +182,14 @@ export type TesseraErrorCode =
   | 'BUILD_FUSE_CONSTRUCTION_FAILED'
   | 'BUILD_MEMBER_KEYS_TYPE'
   | 'BUILD_OPTS_TYPE'
-  // --- TEST_* — filter.ts (testMembership) ---
+  // --- TEST_* — filter.ts (testMembership, describeFilter, testMany) ---
   | 'TEST_VALUE_INVALID'
   | 'TEST_FILTER_TYPE'
+  // `testMany`'s own non-array-values check (additive) — `TEST_VALUE_INVALID`
+  // (a bad ELEMENT) and `TEST_FILTER_TYPE` (a bad `f`) are reused as-is, since
+  // they mean exactly what they already mean; this is the one genuinely new
+  // failure mode `testMany` introduces (filter.ts).
+  | 'TEST_VALUES_TYPE'
   // --- INPUT_* — standalone utility-function validation (member-key.ts, padding.ts, nostr.ts) ---
   | 'INPUT_PUBKEY_INVALID'
   | 'INPUT_PUBKEY_TYPE'

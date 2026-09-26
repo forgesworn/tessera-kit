@@ -39,6 +39,38 @@ export interface MembershipFilter {
   readonly _padded: boolean
 }
 
+/**
+ * Public, read-only inspection of a `MembershipFilter`'s metadata — returned
+ * by `describeFilter` (`filter.ts`, PROTOCOL.md §10). Every field here is
+ * already readable from the serialized `KFLT` blob's HEADER (§3) by anyone
+ * who holds the blob, or is a pure arithmetic derivation of header fields
+ * (`arrayLength`/`byteLength` from `segmentLength`/`segmentCount`;
+ * `theoreticalFalsePositiveRate` from `fingerprintBits`) — `describeFilter`
+ * reveals NOTHING beyond what the wire format already discloses; it exists
+ * only so a consumer doesn't have to reach into the underscored internal
+ * fields (`_fuse`, `_memberCountBand`, `_padded`) or hand-parse a blob to get
+ * at them. It deliberately does NOT expose the fuse `seed` or the raw
+ * `fingerprints` array — those are carried internally (`_fuse`) but are not
+ * part of this documented contract.
+ */
+export interface FilterDescription {
+  readonly fingerprintBits: FingerprintBits
+  readonly filterType: FilterType
+  readonly keyed: boolean
+  readonly padded: boolean
+  readonly epoch: number
+  /** The TRUE member count's power-of-two bucket (`member_count_band`, §3) —
+   *  leaks by design (spec §2.8); NOT the padded array size. */
+  readonly memberCountBand: number
+  readonly segmentLength: number
+  readonly segmentCount: number
+  readonly arrayLength: number
+  /** The serialized blob's total size in bytes: `KFLT_HEADER_LEN + arrayLength*2`. */
+  readonly byteLength: number
+  /** `2 ** -fingerprintBits` — the per-test false-positive probability (§7.1). */
+  readonly theoreticalFalsePositiveRate: number
+}
+
 export interface FilterBuildOptions {
   fingerprintBits?: FingerprintBits            // default 16
   salt?: string                                // hex; presence ⇒ keyed=true. When

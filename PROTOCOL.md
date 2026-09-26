@@ -509,6 +509,68 @@ freshly-tagged event. Track the highest `epoch` you've accepted per
 `(pinnedPubkeyHex, context)` and pass it back in as `minEpoch` on the next check
 (§6 restates this for the Nostr publication path specifically).
 
+**`minEpoch` is non-strict — a limitation, closeable with `strictlyNewerThan`
+(additive, post-0.2.0).** `minEpoch`'s comparison is `epoch < minEpoch`
+(§9's `VERIFY_STALE_EPOCH`), which is deliberately **not** `<=`: a parsed
+`epoch` EQUAL to `minEpoch` always passes. That is correct for "reject
+anything OLDER than the last one I saw," but it means a blob re-served for an
+epoch you've already accepted is not itself flagged.
+
+> ⚠️ **This kit does NOT enforce "one content per epoch."** Nothing in
+> `buildMembershipFilter`, `signFilterBlob`, or `parseFilter`/`verifyFilterBlob`
+> stops a signer from producing and signing TWO DIFFERENT blobs that both
+> carry the SAME `epoch` — for example, correcting a mistake and re-signing
+> the corrected membership set under the epoch it meant to publish the first
+> time, rather than bumping to a new one. `epoch` is a freshness/rollback
+> marker the SIGNER chooses to set, not a hash or sequence number the kit
+> derives from, or binds to, the blob's actual content. **`minEpoch` alone
+> cannot detect this** — two same-epoch blobs both pass `epoch < minEpoch`
+> identically, regardless of whether their fingerprint arrays differ.
+> Detecting a same-epoch content change is out of scope for this kit's epoch
+> mechanism; if that distinction matters to a deployment, compare the parsed
+> filter's own bytes/hash out of band, or have the signer bump `epoch` on
+> every real change instead.
+
+Some deployments want a DIFFERENT, narrower guarantee than the above: "this
+MUST be a genuinely newer epoch than the last one I accepted" (not "the
+content might have silently changed under the same epoch" — see the warning
+above, which `strictlyNewerThan` does NOT address either).
+`verifyAndParseFilter`'s optional `opts.strictlyNewerThan` provides that
+narrower guarantee for a caller who opts in — the parsed `epoch` MUST be
+**strictly greater** than `strictlyNewerThan`, or this throws
+`VERIFY_EPOCH_NOT_NEWER`. It is validated the same way as `minEpoch`
+(non-negative safe integer; a malformed value throws
+`VERIFY_STRICTLY_NEWER_THAN_INVALID`), checked at the same point (after the
+signature/signer/context check, alongside `minEpoch`'s own staleness check),
+and is entirely independent of `minEpoch` — passing both is fine, and
+`minEpoch`'s own behaviour (including the non-strict `<` comparison) is
+completely unchanged by `strictlyNewerThan`'s mere presence. Omit it and
+nothing changes from 0.2.0's behaviour.
+
+> ⚠️ **Passing `strictlyNewerThan` = the last epoch you accepted makes an
+> ORDINARY re-fetch of the CURRENT, unchanged epoch throw
+> `VERIFY_EPOCH_NOT_NEWER`.** This is not a bug — it is exactly what "strictly
+> newer" means — but it is easy to misuse: a consumer that re-polls the same
+> filter on a schedule, and passes its last-accepted epoch as
+> `strictlyNewerThan` on every poll (the same value it would correctly pass as
+> `minEpoch`), will throw on EVERY poll where nothing changed, not just on a
+> genuine rollback. **`strictlyNewerThan` answers "is there a newer epoch than
+> the one I already have," not "is this blob still valid" — those are
+> different questions, and re-fetching the current epoch is normal, expected
+> behaviour, not an error condition.** Recommended usage:
+>
+> - **For an ordinary re-fetch/poll of a filter you already hold** (the
+>   common case), use `minEpoch`, not `strictlyNewerThan` — `minEpoch` accepts
+>   "still the same epoch I already have" exactly as intended, and only
+>   rejects a genuine rollback to something OLDER.
+> - **If you use `strictlyNewerThan` anyway** (e.g. because you specifically
+>   want to detect "nothing new since my last check" as a distinct outcome
+>   from "here is fresh data"), catch `VERIFY_EPOCH_NOT_NEWER` and treat it as
+>   "no update since last time," not as a trust/validity failure — do NOT
+>   treat it the same way you'd treat `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH` or
+>   a parse failure. The blob you re-fetched may be perfectly valid; it is
+>   simply not newer than what you already had.
+
 **Cross-server/namespace substitution — closed cryptographically by `context`.**
 Nothing in the 128-byte header (§3) identifies which server or namespace a
 filter belongs to. Before the `context` binding existed, `pinnedPubkeyHex` was
@@ -979,6 +1041,33 @@ be reworded at any time; only `code` should be matched programmatically.
 `rejectCases`) freeze the exact `code` each listed malformed input must
 throw — see `CONFORMANCE.md`.
 
+**Precisely what "stable" promises, stated as a version policy (additive,
+post-0.2.0 clarification):**
+
+- **An EXISTING code never changes MEANING, and never disappears, within a
+  major version.** `PARSE_BAD_MAGIC` means "bad magic bytes" for the entire
+  `1.x` line (whatever `1.x` turns out to mean for this package's own
+  versioning); it is never repurposed for a different failure, and it is
+  never removed without a major version bump.
+- **NEW codes MAY be added in a MINOR release.** This pass itself is the
+  example: `TEST_VALUES_TYPE`, `VERIFY_STRICTLY_NEWER_THAN_INVALID`, and
+  `VERIFY_EPOCH_NOT_NEWER` (§10, §4.3) are new codes, added without bumping
+  a major version, because they are new FAILURE MODES from new, additive
+  functionality (`testMany`, `strictlyNewerThan`) — no existing code's
+  meaning changed.
+- **Consequence for consumers: do NOT write an exhaustive `switch` over
+  `TesseraErrorCode` with no `default`, and do NOT write a
+  `Record<TesseraErrorCode, ...>` that TypeScript would only accept if every
+  current code has an entry.** Either pattern compiles cleanly against
+  today's union but breaks (a `switch` silently falls through with no case
+  matched; a `Record` literal fails to type-check) the moment a future MINOR
+  release adds one more code — which this contract explicitly allows it to
+  do. Write a `switch` with a `default` (or an `if/else if` chain with a
+  trailing `else`) that handles "a code I don't specifically recognise" as
+  its own case, and treat an unrecognised code the same conservative way you
+  would treat any other reject: not proof of anything, no special handling
+  attempted.
+
 Codes are grouped by the prefix before the first underscore:
 
 | Prefix | Owner | Meaning |
@@ -1038,6 +1127,8 @@ little about WHY a blob was rejected as a message-based one did.
 | `VERIFY_STALE_EPOCH` | the parsed filter's `epoch` is older than `minEpoch` |
 | `VERIFY_BLOB_TYPE` | `verifyFilterBlob`'s `blob` is not a `Uint8Array` (a caller TYPE bug, distinct from the "never throws on hostile content" guarantee — §4.2) |
 | `VERIFY_OPTS_TYPE` | `verifyAndParseFilter`'s `opts` is not an object |
+| `VERIFY_STRICTLY_NEWER_THAN_INVALID` | `verifyAndParseFilter`'s `strictlyNewerThan` is given but not a non-negative safe integer (additive, §4.3) |
+| `VERIFY_EPOCH_NOT_NEWER` | `strictlyNewerThan` is given and the parsed filter's `epoch` is not strictly greater than it — closes the same-epoch-replay gap `minEpoch` alone leaves open, for a caller who opts in (additive, §4.3) |
 | `CAPABILITY_EXPIRES_AT_INVALID` | `expiresAt` is not a non-negative safe integer (issue or test) |
 | `CAPABILITY_SERVER_ID_EMPTY` | `serverId` is empty or not a string |
 | `CAPABILITY_SERVER_ID_HAS_COLON` | `serverId` contains a colon (delimiter-injection guard) |
@@ -1069,8 +1160,9 @@ little about WHY a blob was rejected as a message-based one did.
 | `BUILD_FUSE_CONSTRUCTION_FAILED` | Binary Fuse 16 peeling failed to converge within `MAX_ATTEMPTS` (pathological input; see CONFORMANCE.md) |
 | `BUILD_MEMBER_KEYS_TYPE` | `buildMembershipFilter`'s `memberKeysHex` is not an array |
 | `BUILD_OPTS_TYPE` | `buildMembershipFilter`'s `opts` is not an object |
-| `TEST_VALUE_INVALID` | `testMembership`'s query value is not 64 hex chars |
-| `TEST_FILTER_TYPE` | `testMembership`'s `f` is not a `MembershipFilter`-shaped object |
+| `TEST_VALUE_INVALID` | `testMembership`'s query value is not 64 hex chars — also thrown by `testMany` (§10) for the same reason, on any one element |
+| `TEST_FILTER_TYPE` | `testMembership`'s `f` is not a `MembershipFilter`-shaped object — also thrown by `testMany` and `describeFilter` (§10) for the same reason |
+| `TEST_VALUES_TYPE` | `testMany`'s `valuesHex` is not an array (additive, §10) |
 | `INPUT_PUBKEY_INVALID` | `memberKey`'s `pubkeyHex` is not 64 lowercase hex chars |
 | `INPUT_PUBKEY_TYPE` | `memberKey`'s `pubkeyHex` is not a string |
 | `INPUT_SALT_INVALID` | `memberKey`'s `saltHex` is given but not non-empty even-length hex |
@@ -1083,3 +1175,202 @@ little about WHY a blob was rejected as a message-based one did.
 | `INPUT_CONTENT_MALFORMED_BASE64` | `content` is not valid base64 |
 | `INPUT_CONTENT_DECODED_TOO_LARGE` | the actually-decoded length exceeds the cap (defence in depth beyond the length pre-check) |
 | `INPUT_PUBLICATION_TYPE` | `buildFilterPublication`'s `p` is not an object, or `p.blob` is not a `Uint8Array` |
+
+---
+
+## 10. Introspection & bulk-test helpers (`describeFilter`, `testMany`)
+
+Additive, post-0.2.0 conveniences. Neither changes the wire format, an
+existing function's behaviour, or an existing error code; both are read-only
+views over an already-built/parsed `MembershipFilter`.
+
+### 10.1 `describeFilter(f) → FilterDescription`
+
+`MembershipFilter` (§ "1. `memberKey`" onward) carries its band/padded/fuse
+state on underscored fields (`_fuse`, `_memberCountBand`, `_padded`) that are
+explicitly NOT part of the documented public contract (`types.ts`'s comment
+on `MembershipFilter`). `describeFilter` is the documented, public way to read
+that same information, as a plain readonly object:
+
+```
+FilterDescription = {
+  fingerprintBits, filterType, keyed, padded, epoch, memberCountBand,
+  segmentLength, segmentCount, arrayLength, byteLength,
+  theoreticalFalsePositiveRate,
+}
+```
+
+Every field is either a header field the serialized `KFLT` blob already
+discloses to anyone holding it (§3's table: `fingerprint_bits`, `filter_type`,
+`flags.keyed`/`flags.padded`, `epoch`, `member_count_band`, `segment_length`,
+`segment_count`), or a pure arithmetic function of those fields that any
+holder could already compute themselves:
+
+- `arrayLength = (segmentCount + 2) * segmentLength` (§3's `ARITY_MINUS_ONE`
+  formula, the same one `codec.ts` uses on both serialize and parse).
+- `byteLength = 128 + arrayLength * 2` (`KFLT_HEADER_LEN` plus the fingerprint
+  array — `serializeFilter`'s own output-size formula).
+- `theoreticalFalsePositiveRate = 2 ** -fingerprintBits` (§7.1's `p`).
+
+**`describeFilter` reveals nothing beyond the serialized header.** It
+deliberately does NOT expose the fuse `seed` or the raw `fingerprints` array —
+those are on-wire too, but carry no documented public meaning beyond "opaque
+construction/query state," so they are left off this contract to keep it
+small and stable. `memberCountBand` is the coarse, TRUE-count power-of-two
+bucket (§2.8) — it "leaks by design"; `describeFilter` changes nothing about
+that, it only makes reading it a documented operation instead of a
+`f._memberCountBand` reach-around.
+
+Throws `TEST_FILTER_TYPE` (§9) if `f` is not a `MembershipFilter`-shaped
+object — the SAME code `testMembership`/`testMany` throw for the same
+reason.
+
+### 10.2 `testMany(f, valuesHex) → boolean[]`
+
+Tests every value in `valuesHex` against `f`, in order, with the EXACT same
+semantics and validation `testMembership(f, v)` applies to a single value:
+
+- `f` is validated identically and throws the same `TEST_FILTER_TYPE` for a
+  non-`MembershipFilter`.
+- each element of `valuesHex` is validated identically (64 lowercase-or-mixed
+  hex chars) and throws the same `TEST_VALUE_INVALID` for a malformed one.
+- `testMany` introduces exactly one NEW failure mode: `valuesHex` itself not
+  being an array, which throws `TEST_VALUES_TYPE` (§9) — `testMembership` has
+  no equivalent case to reuse a code from, since it takes one scalar value,
+  not a container.
+
+`testMany(f, values)` is equivalent to `values.map(v => testMembership(f,
+v))` for every input, valid or invalid (same results, same thrown code on the
+same first bad element) — it validates `f` once rather than once per element
+and calls the underlying fuse query directly, which is faster than the
+equivalent `.map` loop for a large `valuesHex` but is not a different
+algorithm: each value is still hashed and queried independently (§2.6).
+
+---
+
+## 11. Evolution / versioning
+
+This section is additive documentation (post-0.2.0): it states, in one place,
+what each of this format's version-like knobs actually covers, and what a
+future breaking change would look like. It does not change any current
+behaviour — every claim below matches what `parseFilter`/`signFilterBlob`/
+`verifyFilterBlob` actually do today (§3.1, §4.1).
+
+**`KFLT_VERSION` (the on-wire `format_version` byte, offset 4, §3) covers the
+128-byte header LAYOUT and the fingerprint-array encoding** — field order,
+widths, and the LE16 fingerprint-array format. It is `1` today and `1` is the
+ONLY value `parseFilter` accepts (step 3, §3.1): any other value throws
+`PARSE_UNSUPPORTED_VERSION` (§9), unconditionally, before any other header
+field is even read. `KFLT_VERSION` does NOT cover the signed-digest
+construction (see the domain tag, below) or the capability/Nostr-publication
+byte shapes (§5, §6) — those version independently, on their own tags/fields.
+
+**Reserved `filter_type` and `fingerprint_bits` values are a forward-compat
+budget already reserved by `format_version = 1`, not a future version bump.**
+§3's header table reserves `filter_type ∈ {2, 3}` (xor, cuckoo) and
+`fingerprint_bits ∈ {8, 20, 32}` inside the CURRENT header layout — a
+"reserved" value is a placeholder for a construction the current byte layout
+already has room for (item 10 of the pre-publish gap survey discusses
+implementing one, e.g. Binary Fuse 32, without needing a new
+`format_version`). `parseFilter` rejects every reserved-but-unimplemented
+value explicitly and by name today: `PARSE_INVALID_FILTER_TYPE` /
+`PARSE_UNSUPPORTED_FILTER_TYPE` for `filter_type`,
+`PARSE_INVALID_FINGERPRINT_BITS` / `PARSE_UNSUPPORTED_FINGERPRINT_BITS` for
+`fingerprint_bits` (§9). Implementing one of these later widens the exported
+`FilterType`/`FingerprintBits` TypeScript types again (see the note at §3) —
+a deliberate, additive change to what the types advertise, not a
+`format_version` bump, since the byte LAYOUT does not need to change to fill
+an already-reserved slot.
+
+**The signing-digest domain tag versions independently of `KFLT_VERSION`.**
+`"tessera-kflt-sig:v1"` (§4.1, the fixed prefix folded into the signed
+digest) has its own `:v1` suffix, separate from `KFLT_VERSION`'s `1`. A future
+change to the DIGEST CONSTRUCTION ONLY — for example, folding in an additional
+field, or changing the length-prefix encoding — would bump this tag to
+`:v2` while `KFLT_VERSION` stays `1`, exactly as the `context`-binding change
+that introduced `:v1` itself did (it changed the digest formula, not the
+128-byte header — see sign.ts's module note). Conversely, a `KFLT_VERSION`
+bump that only changed unrelated header fields would leave the signing tag at
+`:v1`. The two axes are deliberately independent, so each can change without
+forcing a change to the other.
+
+**Error codes (`TesseraErrorCode`, §9) are a stable contract, versioned by
+addition only.** §9 already states this; restated here for completeness
+alongside the other version-like surfaces this section covers: removing or
+renaming a code is a breaking change, exactly like removing an exported
+function would be; adding a new code for a new failure mode (as this very
+pass did — `VERIFY_STRICTLY_NEWER_THAN_INVALID`, `VERIFY_EPOCH_NOT_NEWER`,
+`TEST_VALUES_TYPE`, §10) is not.
+
+**What a future v2 would actually change, and how a verifier rejects an
+unknown version today.** A hypothetical `format_version = 2` would be free to
+change anything about the header layout `format_version = 1` fixes: field
+widths/order/count, the 128-byte header length itself, or how the fingerprint
+array is encoded. It could NOT retroactively change how a `format_version =
+1` blob is interpreted — old blobs must keep parsing exactly as they do today,
+for as long as `parseFilter` supports them.
+
+**Correction — this depends on WHICH function rejects it (`parseFilter` vs.
+`verifyAndParseFilter`); an earlier draft of this paragraph glossed over the
+difference and stated the claim too strongly.**
+
+- **Called through `parseFilter` directly**, `format_version` IS what rejects
+  an unknown version — but only after two prior checks (§3.1 steps 1-2): the
+  blob-length bounds check (`PARSE_BLOB_TOO_SHORT`/`PARSE_BLOB_TOO_LARGE`)
+  and the magic-bytes check (`PARSE_BAD_MAGIC`) both run BEFORE the
+  `format_version` byte is even read. A too-short/too-long or bad-magic blob
+  never reaches the version check at all, regardless of what its
+  `format_version` byte says. Only once a blob is in-bounds and has the
+  correct magic does `parseFilter` read `format_version` and throw
+  `PARSE_UNSUPPORTED_VERSION` (§3.1 step 3, §9) for anything other than `1`.
+- **Called through `verifyAndParseFilter` (§4.3, the RECOMMENDED path)** — the
+  one most consumers actually use — an unknown-version blob is rejected
+  EARLIER and DIFFERENTLY: `verifyAndParseFilter` calls `verifyFilterBlob`
+  FIRST, and `verifyFilterBlob` (§4.1/§4.2) never inspects `format_version`
+  at all. It unconditionally treats `blob[0..64)` as "header fields +
+  signer_pubkey" and `blob[128..end)` as "the fingerprint region" — the exact
+  v1 offsets — and computes the v1 digest over them regardless of what the
+  version byte says. A blob at a genuinely different format version almost
+  certainly does NOT carry a signature that verifies against that v1-shaped
+  digest (a v2 signer would have signed a v2-shaped digest, or a
+  differently-laid-out header, or both) — so `ok` comes back `false`, and
+  `verifyAndParseFilter` throws `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH`
+  (§4.2/§4.3, §9) BEFORE `parseFilter` is ever called. `PARSE_UNSUPPORTED_VERSION`
+  is reachable through this path only in the narrow case where the
+  differently-versioned blob HAPPENS to carry a validly-verifying v1-shaped
+  signature under the pinned key for the given `context` anyway — which a
+  genuine v2 blob, signed by a v2-aware signer using v2's own digest
+  construction, essentially never will.
+- **The practical upshot:** most consumers, using `verifyAndParseFilter`,
+  will observe an unknown-version blob rejected as
+  `VERIFY_SIGNATURE_OR_SIGNER_MISMATCH`, not `PARSE_UNSUPPORTED_VERSION` —
+  the SAME opaque code a bad signature or wrong signer produces (by design,
+  §9's security rule). Only a caller using `parseFilter` directly (bypassing
+  verification) sees the version-specific code.
+
+**What a future v2 VERIFIER would need to do, given the above.** A v2-aware
+implementation that must support BOTH `format_version = 1` and `= 2` blobs
+cannot simply keep today's `verifyFilterBlob` (fixed v1 offsets, fixed v1
+digest tag) and layer a v2 `parseFilter` on top of it — that combination
+would reject every genuine v2 blob at the signature step, exactly as
+described above, never reaching a version-aware code path at all. It would
+instead need to inspect `format_version` FIRST — before choosing which
+digest construction and which header-offset assumptions to verify with — and
+dispatch to the v1 or v2 verify logic accordingly, only THEN parsing with the
+matching version's `parseFilter` logic. Read the byte, decide the
+construction, THEN verify; never assume one fixed construction and hope a
+different version's blob happens to fail informatively.
+
+**A v2-supporting `parseFilter` alone (independent of the above) MUST keep
+throwing `PARSE_UNSUPPORTED_VERSION` for anything it does not explicitly
+support** — checked right after the bounds and magic checks (§3.1 steps 1-3),
+before any OTHER header field is trusted, exactly as today. This kit
+implements `format_version = 1` only, so today "unknown version" means
+"anything other than `1`," full stop; a future implementation that adds
+`format_version = 2` support would widen that check to `version !== 1 &&
+version !== 2`, but the PRINCIPLE — reject anything not explicitly
+recognised, right after bounds/magic and before any other field — does not
+change. A dual-publish migration window (`format_version = 1` and `= 2`
+blobs served side by side) is a deployment strategy, not something this
+format needs to encode on the wire beyond the `format_version` byte itself
+already distinguishing them.

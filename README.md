@@ -172,15 +172,17 @@ const friendPresent = testWithCapability(keyedFilter, cap)
 | `memberKey(pubkeyHex, saltHex?)` | The value to insert/test: the pubkey (open) or `sha256(salt ‖ pubkey)` (keyed). |
 | `buildMembershipFilter(valuesHex, opts)` | Build a Binary Fuse 16 filter over already-`memberKey`-transformed values. `opts.epoch` required; `fingerprintBits` defaults to 16; `padToBucket` defaults to true; `salt` presence sets the keyed flag; `decoySeedHex` for decoys that are stable within an epoch but re-keyed per epoch (defeats cross-epoch diffing — see SECURITY.md §4). |
 | `testMembership(filter, valueHex)` | Local membership test. No false negatives; false positives ≈ 2⁻¹⁶. |
+| `testMany(filter, valuesHex)` | Test many values in one call — the exact same validation/semantics as calling `testMembership` on each value, in order. |
+| `describeFilter(filter)` | Public, read-only view of a filter's metadata (`fingerprintBits`, `filterType`, `keyed`, `padded`, `epoch`, `memberCountBand`, `segmentLength`, `segmentCount`, `arrayLength`, `byteLength`, `theoreticalFalsePositiveRate`) — reveals nothing beyond the serialized header. |
 | `serializeFilter(filter)` | Encode to the `KFLT` blob (signer/sig regions left zero). |
 | `parseFilter(blob)` | Hardened decode — validates magic/version/geometry and recomputes length **before** allocating. Self-consistency only; **not** provenance. |
 | `signFilterBlob(blob, signerPrivHex, context)` | Sign the blob **in place** (writes signer pubkey + Schnorr sig), binding `context` (a required, non-empty string — the deployment's stable address) into the signed digest. Zeroizes the priv byte copy. |
 | `verifyFilterBlob(blob, context)` | `{ signerPubkeyHex, ok }`. Never throws on hostile **blob** input (throws on a malformed `context`, a caller config error). `context` must match what was signed or `ok` is `false`, indistinguishable from a bad signature. **Compare `signerPubkeyHex` to a pinned key before trusting a hit.** |
-| `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch? })` | The recommended combined path: pin-verifies, parses, and (if `minEpoch` given) rejects a stale/rolled-back filter. Throws on any failure. |
+| `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch?, strictlyNewerThan? })` | The recommended combined path: pin-verifies, parses, and (if `minEpoch` given) rejects a stale/rolled-back filter. `strictlyNewerThan` (optional, additive) rejects a filter whose `epoch` is not *strictly* newer — closes the same-epoch-replay gap `minEpoch` alone leaves open, for callers who opt in. Throws on any failure. |
 | `nextPowerOfTwoBand(n)` | Size-bucket function (the `member_count_band`). |
 | `deriveDecoys(decoySeedHex, count)` | Deterministic decoy keys for a given `(decoySeedHex, count)`. `buildMembershipFilter` calls this with an epoch-derived seed, not the caller's raw `decoySeedHex` — see SECURITY.md §4. |
 
-Types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, and the `KFLT_*` constants.
+Types: `MembershipFilter`, `FilterBuildOptions`, `FilterDescription`, `FilterType`, `FingerprintBits`, and the `KFLT_*` constants.
 
 ### `./capability`
 

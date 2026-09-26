@@ -535,6 +535,86 @@ describe('verifyAndParseFilter (B4 audit fix)', () => {
     ).toThrow(/stale|rollback/)
   })
 
+  // `opts.strictlyNewerThan` (additive, opt-in) — closes the same-epoch-replay
+  // gap `minEpoch`'s `<` (not `<=`) comparison leaves open: `minEpoch` alone
+  // lets an EQUAL epoch through, so a caller who needs "strictly newer, no
+  // replay of the exact same epoch either" opts into this separate check.
+  // `minEpoch`'s own behaviour is completely unchanged by this option's mere
+  // presence in `opts` — see the two tests further down that assert that.
+  describe('opts.strictlyNewerThan (additive epoch check)', () => {
+    it('accepts a filter whose epoch is strictly greater than strictlyNewerThan', () => {
+      const { blob } = signedBlob(10, 120)
+      const filter = verifyAndParseFilter(blob, {
+        pinnedPubkeyHex: SERVER.pubHex,
+        context: CTX,
+        strictlyNewerThan: EPOCH - 1,
+      })
+      expect(filter.epoch).toBe(EPOCH)
+    })
+
+    it('throws VERIFY_EPOCH_NOT_NEWER when the parsed epoch equals strictlyNewerThan (closes the same-epoch-replay gap)', () => {
+      const { blob } = signedBlob(10, 121)
+      let code: string | undefined
+      try {
+        verifyAndParseFilter(blob, {
+          pinnedPubkeyHex: SERVER.pubHex,
+          context: CTX,
+          strictlyNewerThan: EPOCH,
+        })
+      } catch (e) {
+        code = (e as { code?: string }).code
+      }
+      expect(code).toBe('VERIFY_EPOCH_NOT_NEWER')
+    })
+
+    it('throws VERIFY_EPOCH_NOT_NEWER when the parsed epoch is less than strictlyNewerThan', () => {
+      const { blob } = signedBlob(10, 122)
+      let code: string | undefined
+      try {
+        verifyAndParseFilter(blob, {
+          pinnedPubkeyHex: SERVER.pubHex,
+          context: CTX,
+          strictlyNewerThan: EPOCH + 1,
+        })
+      } catch (e) {
+        code = (e as { code?: string }).code
+      }
+      expect(code).toBe('VERIFY_EPOCH_NOT_NEWER')
+    })
+
+    it('rejects a malformed strictlyNewerThan (negative, fractional, NaN) with VERIFY_STRICTLY_NEWER_THAN_INVALID', () => {
+      const { blob } = signedBlob(10, 123)
+      for (const bad of [-1, 1.5, Number.NaN, Infinity]) {
+        let code: string | undefined
+        try {
+          verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex, context: CTX, strictlyNewerThan: bad })
+        } catch (e) {
+          code = (e as { code?: string }).code
+        }
+        expect(code).toBe('VERIFY_STRICTLY_NEWER_THAN_INVALID')
+      }
+    })
+
+    it('omitting strictlyNewerThan entirely leaves minEpoch behaviour unchanged', () => {
+      const { blob } = signedBlob(10, 124)
+      // Same-epoch is accepted by minEpoch alone when strictlyNewerThan is not given.
+      expect(() =>
+        verifyAndParseFilter(blob, { pinnedPubkeyHex: SERVER.pubHex, context: CTX, minEpoch: EPOCH }),
+      ).not.toThrow()
+    })
+
+    it('both minEpoch and strictlyNewerThan can be given together', () => {
+      const { blob } = signedBlob(10, 125)
+      const filter = verifyAndParseFilter(blob, {
+        pinnedPubkeyHex: SERVER.pubHex,
+        context: CTX,
+        minEpoch: EPOCH,
+        strictlyNewerThan: EPOCH - 1,
+      })
+      expect(filter.epoch).toBe(EPOCH)
+    })
+  })
+
   // Context mismatch — the security-load-bearing case (spec §4.3): a blob
   // signed for one deployment's context must be rejected when checked against
   // a DIFFERENT context, and the failure must be the SAME generic message as

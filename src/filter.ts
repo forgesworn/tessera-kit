@@ -25,7 +25,8 @@ import { BinaryFuse16 } from './fuse.js'
 import { nextPowerOfTwoBand, padMembersToBucket } from './padding.js'
 import { isValidSaltHex } from './member-key.js'
 import { TesseraError } from './errors.js'
-import type { FilterBuildOptions, MembershipFilter } from './types.js'
+import { KFLT_HEADER_LEN } from './types.js'
+import type { FilterBuildOptions, FilterDescription, MembershipFilter } from './types.js'
 
 /** Every member key handed to `buildMembershipFilter` must already be a
  *  `memberKey()` output: exactly 64 hex chars, case-insensitive (lowercased
@@ -254,4 +255,108 @@ export function testMembership(f: MembershipFilter, valueHex: string): boolean {
     throw new TesseraError('TEST_VALUE_INVALID', 'tessera-kit: testMembership value must be 64 hex chars')
   }
   return f._fuse.contains(valueHex.toLowerCase())
+}
+
+/**
+ * Test MANY values against `f` in one call — the exact same semantics and
+ * validation as calling `testMembership(f, v)` for each `v` in `valuesHex`,
+ * in order, and collecting the results.
+ *
+ * VALIDATION (deliberately identical to `testMembership`, plus one new
+ * check): `f` is validated the same way and throws the SAME `TEST_FILTER_TYPE`
+ * code for a non-`MembershipFilter`; each element of `valuesHex` is validated
+ * the same way and throws the SAME `TEST_VALUE_INVALID` code for a malformed
+ * value (odd-length / non-hex / wrong-length) — `testMany` introduces exactly
+ * ONE new failure mode, `valuesHex` itself not being an array
+ * (`TEST_VALUES_TYPE`), since `testMembership` has no equivalent "the query
+ * value isn't even the right JS type at the container level" case to reuse.
+ *
+ * PERFORMANCE: this validates `f` ONCE (not once per element, the way a
+ * `valuesHex.map(v => testMembership(f, v))` loop would) and calls
+ * `f._fuse.contains` directly per element — the same fast path
+ * `testMembership` itself uses, without redoing `testMembership`'s own `f`
+ * shape check `valuesHex.length` times. For a large sweep this is a real,
+ * if modest, saving over the equivalent `.map` loop; there is no shared
+ * per-value precomputation to exploit beyond that (each `contains` call
+ * hashes its own value independently — spec §2.6), so this is not
+ * asymptotically faster, just leaner.
+ *
+ * @param f         the `MembershipFilter` to test against.
+ * @param valuesHex the query values, each a `memberKey()`-shaped 64-hex
+ *                  string (validated exactly as `testMembership` validates
+ *                  a single value). Accepts a `readonly` array.
+ * @returns a `boolean[]` the same length as `valuesHex`, in the same order.
+ */
+export function testMany(f: MembershipFilter, valuesHex: readonly string[]): boolean[] {
+  // Same check, same code, as testMembership — see its doc comment.
+  if (f === null || typeof f !== 'object' || !f._fuse) {
+    throw new TesseraError('TEST_FILTER_TYPE', 'tessera-kit: testMany filter (f) must be a MembershipFilter')
+  }
+  // The one NEW failure mode testMany has that testMembership does not: the
+  // values argument itself must be an array (testMembership takes a single
+  // scalar value, so there is nothing analogous to reuse a code from).
+  if (!Array.isArray(valuesHex)) {
+    throw new TesseraError('TEST_VALUES_TYPE', 'tessera-kit: testMany values must be an array')
+  }
+  const fuse = f._fuse
+  const results: boolean[] = new Array(valuesHex.length)
+  for (let i = 0; i < valuesHex.length; i++) {
+    const v = valuesHex[i]
+    // Same check, same code, as testMembership's single-value check — the
+    // message names the offending index (matching buildMembershipFilter's
+    // per-element style) since testMany validates an ARRAY, not one scalar.
+    if (typeof v !== 'string' || !HEX64.test(v)) {
+      throw new TesseraError('TEST_VALUE_INVALID', `tessera-kit: testMany valuesHex[${i}] must be 64 hex chars`)
+    }
+    results[i] = fuse.contains(v.toLowerCase())
+  }
+  return results
+}
+
+/**
+ * Inspect `f`'s PUBLIC metadata as a plain, readonly object (PROTOCOL.md
+ * §10) — item 9 of the post-0.2.0 additive pass. `MembershipFilter` itself
+ * carries this same information on underscored (`_fuse`, `_memberCountBand`,
+ * `_padded`), explicitly-undocumented-contract fields (see `types.ts`); this
+ * is the DOCUMENTED, public way to read it, without reaching into internals
+ * or hand-parsing a serialized blob.
+ *
+ * REVEALS NOTHING NEW: every field returned here is either already a
+ * documented header field on the wire format (§3) — `fingerprintBits`,
+ * `filterType`(`filter_type`), `keyed`/`padded` (`flags`), `epoch`,
+ * `memberCountBand` (`member_count_band`), `segmentLength`, `segmentCount`
+ * — or a pure arithmetic function of those fields that anyone holding the
+ * blob could already compute themselves: `arrayLength` and `byteLength`
+ * from `segmentLength`/`segmentCount` (the same formula `codec.ts` uses),
+ * and `theoreticalFalsePositiveRate` (`2 ** -fingerprintBits`) from
+ * `fingerprintBits`. It deliberately does NOT expose the fuse `seed` or the
+ * raw `fingerprints` array, even though those too are on-wire — they carry
+ * no documented public meaning beyond "opaque construction/query state" and
+ * are left out to keep this a stable, minimal contract.
+ *
+ * @param f the `MembershipFilter` to describe.
+ * @throws `TEST_FILTER_TYPE` if `f` is not a `MembershipFilter`-shaped object
+ *         (the SAME code `testMembership`/`testMany` throw for the same
+ *         reason — this is `filter.ts`'s one "f must be a MembershipFilter"
+ *         check, shared by every function that takes one).
+ */
+export function describeFilter(f: MembershipFilter): FilterDescription {
+  if (f === null || typeof f !== 'object' || !f._fuse) {
+    throw new TesseraError('TEST_FILTER_TYPE', 'tessera-kit: describeFilter filter (f) must be a MembershipFilter')
+  }
+  const fuse = f._fuse
+  const arrayLength = fuse.arrayLength
+  return {
+    fingerprintBits: f.fingerprintBits,
+    filterType: f.type,
+    keyed: f.keyed,
+    padded: f._padded,
+    epoch: f.epoch,
+    memberCountBand: f._memberCountBand,
+    segmentLength: fuse.segmentLength,
+    segmentCount: fuse.segmentCount,
+    arrayLength,
+    byteLength: KFLT_HEADER_LEN + arrayLength * 2,
+    theoreticalFalsePositiveRate: 2 ** -f.fingerprintBits,
+  }
 }

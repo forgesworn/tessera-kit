@@ -1,6 +1,6 @@
 export * from './types.js'
 export * from './member-key.js'
-export { buildMembershipFilter, testMembership } from './filter.js'
+export { buildMembershipFilter, testMembership, testMany, describeFilter } from './filter.js'
 export { serializeFilter, parseFilter } from './codec.js'
 export { signFilterBlob, verifyFilterBlob, verifyAndParseFilter, isValidFilterContext } from './sign.js'
 export { nextPowerOfTwoBand, deriveDecoys } from './padding.js'

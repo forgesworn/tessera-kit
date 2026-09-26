@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { buildMembershipFilter, testMembership } from './filter.js'
+import { buildMembershipFilter, testMembership, testMany, describeFilter } from './filter.js'
 import { memberKey } from './member-key.js'
+import { serializeFilter } from './codec.js'
+import { KFLT_HEADER_LEN } from './types.js'
+import type { MembershipFilter } from './types.js'
 
 // Deterministic distinct 64-hex pubkeys (same style as fuse.test.ts).
 const pubkeys = (n: number, tag = 7): string[] =>
@@ -235,5 +238,112 @@ describe('buildMembershipFilter — epoch validation (B7 audit fix)', () => {
   it('accepts epoch 0 and a normal epoch', () => {
     expect(() => buildMembershipFilter(keys, { epoch: 0 })).not.toThrow()
     expect(() => buildMembershipFilter(keys, { epoch: EPOCH })).not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// describeFilter (item 9, PROTOCOL.md §10) — public inspection that reveals
+// nothing beyond the serialized header.
+// ---------------------------------------------------------------------------
+
+describe('describeFilter', () => {
+  it('reports the documented fields, matching the filter/fuse/serialized state', () => {
+    const memberKeys = pubkeys(20, 80).map((pk) => memberKey(pk))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH, padToBucket: false })
+    const d = describeFilter(f)
+
+    expect(d.fingerprintBits).toBe(16)
+    expect(d.filterType).toBe(1)
+    expect(d.keyed).toBe(false)
+    expect(d.padded).toBe(false)
+    expect(d.epoch).toBe(EPOCH)
+    expect(d.memberCountBand).toBe(f._memberCountBand)
+    expect(d.segmentLength).toBe(f._fuse.segmentLength)
+    expect(d.segmentCount).toBe(f._fuse.segmentCount)
+    expect(d.arrayLength).toBe(f._fuse.arrayLength)
+
+    // byteLength matches the ACTUAL serialized size.
+    const blob = serializeFilter(f)
+    expect(d.byteLength).toBe(blob.length)
+    expect(d.byteLength).toBe(KFLT_HEADER_LEN + f._fuse.arrayLength * 2)
+
+    // theoreticalFalsePositiveRate = 2^-fingerprintBits.
+    expect(d.theoreticalFalsePositiveRate).toBeCloseTo(2 ** -16, 12)
+  })
+
+  it('reflects keyed and padded flags', () => {
+    const memberKeys = pubkeys(20, 81).map((pk) => memberKey(pk, SALT))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH, salt: SALT })
+    const d = describeFilter(f)
+    expect(d.keyed).toBe(true)
+    expect(d.padded).toBe(true)
+  })
+
+  it('returns a plain object, not the internal underscored fields', () => {
+    const memberKeys = pubkeys(5, 82).map((pk) => memberKey(pk))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH })
+    const d = describeFilter(f)
+    expect('_fuse' in d).toBe(false)
+    expect('_memberCountBand' in d).toBe(false)
+    expect('_padded' in d).toBe(false)
+  })
+
+  it('throws a kit-shaped error on a non-MembershipFilter', () => {
+    expect(() => describeFilter(null as unknown as MembershipFilter)).toThrow()
+    expect(() => describeFilter(42 as unknown as MembershipFilter)).toThrow()
+    expect(() => describeFilter({} as unknown as MembershipFilter)).toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// testMany (item 9) — same semantics/validation as calling testMembership on
+// each value.
+// ---------------------------------------------------------------------------
+
+describe('testMany', () => {
+  it('agrees with testMembership over a mix of members and non-members', () => {
+    const pks = pubkeys(30, 83)
+    const memberKeys = pks.map((pk) => memberKey(pk))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH, padToBucket: false })
+
+    const nonMembers = pubkeys(30, 84).map((pk) => memberKey(pk))
+    const probe = [...memberKeys, ...nonMembers]
+
+    const viaMany = testMany(f, probe)
+    const viaLoop = probe.map((v) => testMembership(f, v))
+    expect(viaMany).toEqual(viaLoop)
+    // Sanity: every real member is true, and it isn't just "always true".
+    expect(viaMany.slice(0, memberKeys.length).every(Boolean)).toBe(true)
+  })
+
+  it('returns an empty array for an empty input array', () => {
+    const memberKeys = pubkeys(5, 85).map((pk) => memberKey(pk))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH })
+    expect(testMany(f, [])).toEqual([])
+  })
+
+  it('throws TEST_FILTER_TYPE for a non-MembershipFilter f, same as testMembership', () => {
+    expect(() => testMany(null as unknown as MembershipFilter, [])).toThrow()
+    expect(() => testMany(42 as unknown as MembershipFilter, [])).toThrow()
+  })
+
+  it('throws for a non-array values argument', () => {
+    const memberKeys = pubkeys(5, 86).map((pk) => memberKey(pk))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH })
+    expect(() => testMany(f, null as unknown as string[])).toThrow()
+    expect(() => testMany(f, 'not-an-array' as unknown as string[])).toThrow()
+  })
+
+  it('throws the same shape of error testMembership throws for a bad element', () => {
+    const memberKeys = pubkeys(5, 87).map((pk) => memberKey(pk))
+    const f = buildMembershipFilter(memberKeys, { epoch: EPOCH })
+    expect(() => testMany(f, [memberKeys[0] as string, 'not-hex'])).toThrow(/64 hex/)
+    expect(() => testMembership(f, 'not-hex')).toThrow(/64 hex/)
+  })
+
+  it('accepts a readonly array', () => {
+    const memberKeys = pubkeys(5, 88).map((pk) => memberKey(pk)) as readonly string[]
+    const f = buildMembershipFilter([...memberKeys], { epoch: EPOCH })
+    expect(testMany(f, memberKeys)).toEqual(memberKeys.map(() => true))
   })
 })

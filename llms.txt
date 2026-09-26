@@ -73,12 +73,14 @@ const present = testMembership(filter, memberKey(friendPubkey))
 - `memberKey(pubkeyHex, saltHex?)` — derive the open/keyed insert/test value
 - `buildMembershipFilter(valuesHex, opts)` — build a Binary Fuse 16 filter (`opts.epoch` required)
 - `testMembership(filter, valueHex)` — local membership test (no false negatives; FP ≈ 2⁻¹⁶)
+- `testMany(filter, valuesHex)` — test many values in one call; same validation/semantics as calling `testMembership` on each
+- `describeFilter(filter)` — public read-only metadata view (`fingerprintBits`, `filterType`, `keyed`, `padded`, `epoch`, `memberCountBand`, `segmentLength`, `segmentCount`, `arrayLength`, `byteLength`, `theoreticalFalsePositiveRate`); reveals nothing beyond the serialized header
 - `serializeFilter(filter)` / `parseFilter(blob)` — KFLT encode / hardened decode
 - `signFilterBlob(blob, signerPrivHex, context)` — sign in place (Schnorr), `context` required (non-empty, well-formed UTF-16, ≤1024 UTF-8 bytes) and bound into the digest
 - `verifyFilterBlob(blob, context)` — `{ signerPubkeyHex, ok }`; never throws on hostile blob input (throws on a malformed `context`)
-- `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch? })` — recommended: pin-verify + parse + freshness in one call; use the RETURNED `filter.epoch` for freshness, never a Nostr `epoch` tag
+- `verifyAndParseFilter(blob, { pinnedPubkeyHex, context, minEpoch?, strictlyNewerThan? })` — recommended: pin-verify + parse + freshness in one call; use the RETURNED `filter.epoch` for freshness, never a Nostr `epoch` tag. `strictlyNewerThan` (optional) rejects a same-or-older epoch, stricter than `minEpoch` alone
 - `nextPowerOfTwoBand(n)` / `deriveDecoys(seedHex, count)` — size band + deterministic decoy derivation (a given `(seedHex, count)` always yields the same decoys; see "Padding" above for why `buildMembershipFilter` re-keys this per epoch rather than using a caller's `decoySeedHex` unchanged)
-- types: `MembershipFilter`, `FilterBuildOptions`, `FilterType`, `FingerprintBits`, `KFLT_*`
+- types: `MembershipFilter`, `FilterBuildOptions`, `FilterDescription`, `FilterType`, `FingerprintBits`, `KFLT_*`
 
 `./capability`:
 - `issuePresenceCapability(p, subjectPrivHex)` — `p.salt?` (optional keyed-pool salt, omit for open) is used only to derive `memberValue`; never stored on the token

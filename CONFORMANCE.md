@@ -13,6 +13,13 @@ exercise. This is a **necessary**, not sufficient, condition: a vector suite
 proves agreement on the cases it contains, not universal correctness — see
 "What isn't covered" below.
 
+For what `format_version`/the signing-digest domain tag/error codes each
+version independently, what a hypothetical v2 would be free to change, and
+how a verifier rejects an unknown version, see
+**[PROTOCOL.md §11, "Evolution / versioning"](./PROTOCOL.md#11-evolution--versioning)**
+— that section states the upgrade/compatibility policy this conformance
+checklist assumes.
+
 ## How to run the checks (this repo's own implementation)
 
 ```bash

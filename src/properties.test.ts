@@ -5,10 +5,11 @@
 // about, and pin the honest framing of those claims in executable form.
 
 import { describe, it, expect } from 'vitest'
+import fc from 'fast-check'
 import { randomBytes, bytesToHex } from '@noble/hashes/utils.js'
-import { buildMembershipFilter, testMembership } from './filter.js'
+import { buildMembershipFilter, testMembership, testMany } from './filter.js'
 import { memberKey } from './member-key.js'
-import { serializeFilter } from './codec.js'
+import { serializeFilter, parseFilter } from './codec.js'
 import * as tesseraSurface from './index.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,5 +193,74 @@ describe('non-enumerability sanity (SECURITY.md §2) — no member-listing affor
     // a HELD specific key is still confirmable-present. This is the function, not
     // a leak — `testMembership` returns true for a member you already hold.
     expect(testMembership(f, memberKeys[0] as string)).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Part C — fast-check property tests (item 12 of the gap survey: "no
+// coverage, fuzzing, property framework, or benchmarks"). These complement
+// the hand-rolled Part A/B tests above and the hand-rolled fuzzer in
+// codec.test.ts with fast-check-driven, shrinking property tests over random
+// member sets sized 0..2000 (the task's stated range).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A random set of DISTINCT 32-byte pubkeys, 0..maxLength of them, as
+ *  Uint8Array — deduplicated by fast-check itself via `selector`, so the
+ *  generated array is always already a true set (no need to dedupe again in
+ *  the property body). */
+function distinctPubkeyBytesArb(maxLength: number) {
+  return fc.uniqueArray(fc.uint8Array({ minLength: 32, maxLength: 32 }), {
+    selector: (a) => bytesToHex(a),
+    maxLength,
+  })
+}
+
+describe('fast-check property — build -> serialize -> parse round-trip (item 12 gap survey)', () => {
+  it('for random member sets sized 0..2000: every member tests true on the parsed filter, and re-serializing the parsed filter reproduces the EXACT same bytes', () => {
+    fc.assert(
+      fc.property(distinctPubkeyBytesArb(2000), (pubkeyBytesList) => {
+        // padToBucket:false — the built set is EXACTLY the (already-distinct)
+        // input, so this isolates the round-trip property from padding's own
+        // decoy behaviour (covered separately in padding.test.ts).
+        const memberKeys = pubkeyBytesList.map((b) => memberKey(bytesToHex(b)))
+        const f = buildMembershipFilter(memberKeys, { epoch: 1_700_000_000, padToBucket: false })
+        const blob = serializeFilter(f)
+        const parsed = parseFilter(blob)
+
+        for (const k of memberKeys) {
+          if (!testMembership(parsed, k)) return false
+        }
+
+        // Byte-identical round-trip: re-serializing the PARSED filter must
+        // reproduce the original bytes exactly (same seed/geometry/fingerprints).
+        const reserialized = serializeFilter(parsed)
+        return bytesToHex(reserialized) === bytesToHex(blob)
+      }),
+      { numRuns: 40 },
+    )
+  })
+})
+
+describe('fast-check property — testMany agrees with the equivalent testMembership loop (item 12 gap survey)', () => {
+  it('testMany(f, values) === values.map(v => testMembership(f, v)) for random member/probe sets sized 0..2000', () => {
+    fc.assert(
+      fc.property(
+        distinctPubkeyBytesArb(2000),
+        distinctPubkeyBytesArb(200),
+        (memberPubkeyBytesList, probePubkeyBytesList) => {
+          const memberKeys = memberPubkeyBytesList.map((b) => memberKey(bytesToHex(b)))
+          const f = buildMembershipFilter(memberKeys, { epoch: 1_700_000_000 })
+          // Probe with a mix that may include real members (via padding's
+          // decoys, or by chance) AND non-members — the point is agreement
+          // with the loop, not any particular true/false outcome.
+          const probes = [...memberKeys.slice(0, 20), ...probePubkeyBytesList.map((b) => memberKey(bytesToHex(b)))]
+
+          const viaMany = testMany(f, probes)
+          const viaLoop = probes.map((v) => testMembership(f, v))
+          return viaMany.length === viaLoop.length && viaMany.every((v, i) => v === viaLoop[i])
+        },
+      ),
+      { numRuns: 40 },
+    )
   })
 })

@@ -65,8 +65,10 @@
 // value, OR a change to what an EXISTING code means, is a breaking change,
 // the same as removing or repurposing an exported function would be, and
 // will not happen within a major version. Adding a NEW code for a NEW
-// failure mode is NOT breaking and MAY happen in a MINOR release — this pass
-// itself added three (`TEST_VALUES_TYPE`, `VERIFY_STRICTLY_NEWER_THAN_INVALID`,
+// failure mode is NOT breaking and MAY happen in a non-breaking release —
+// while on 0.y.z that is a PATCH (a caret range ^0.y.z only admits 0.y.*, and
+// a MINOR 0.(y+1).0 is breaking); from 1.0.0 it is a MINOR. 0.2.1
+// added three (`TEST_VALUES_TYPE`, `VERIFY_STRICTLY_NEWER_THAN_INVALID`,
 // `VERIFY_EPOCH_NOT_NEWER`) without bumping a major version, because they are
 // new failure modes from new, additive functionality, not a change to any
 // existing code's meaning.
@@ -74,7 +76,7 @@
 // CONSEQUENCE FOR CONSUMERS (PROTOCOL.md §9 states this too): do NOT write an
 // exhaustive `switch (code) { case 'A': ...; case 'B': ... }` with no
 // `default`, and do NOT write a `Record<TesseraErrorCode, X>` object literal
-// — TypeScript accepts either against TODAY's union, but a future MINOR
+// — TypeScript accepts either against TODAY's union, but a future non-breaking
 // release that adds one more code (which this contract explicitly permits)
 // silently falls through an exhaustiveness-less `switch` at runtime, or fails
 // to type-check a `Record` literal that must cover every member. Always
@@ -93,7 +95,7 @@
  *
  * STABILITY (see the module note above for the full policy): an existing
  * member's meaning is fixed for the life of a major version; new members MAY
- * be added in a minor release. Consumers should not treat this union as
+ * be added in a non-breaking release (a PATCH while on 0.y.z). Consumers should not treat this union as
  * exhaustive-and-closed — code that switches on `TesseraErrorCode` should
  * always have a `default`/`else` fallback for a code it does not recognise.
  */

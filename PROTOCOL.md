@@ -1049,18 +1049,24 @@ post-0.2.0 clarification):**
   `1.x` line (whatever `1.x` turns out to mean for this package's own
   versioning); it is never repurposed for a different failure, and it is
   never removed without a major version bump.
-- **NEW codes MAY be added in a MINOR release.** This pass itself is the
-  example: `TEST_VALUES_TYPE`, `VERIFY_STRICTLY_NEWER_THAN_INVALID`, and
-  `VERIFY_EPOCH_NOT_NEWER` (§10, §4.3) are new codes, added without bumping
-  a major version, because they are new FAILURE MODES from new, additive
-  functionality (`testMany`, `strictlyNewerThan`) — no existing code's
-  meaning changed.
+- **NEW codes MAY be added in a non-breaking release.** Which version
+  number that is depends on where the package is in semver: while it is on
+  `0.y.z`, a caret range (`^0.y.z`) only admits `0.y.*`, so additive APIs and
+  new error codes ship as a **PATCH** (`0.y.z+1`) and a **MINOR** (`0.(y+1).0`)
+  is reserved for breaking changes. From `1.0.0` onward they ship as a MINOR.
+  0.2.1 is the example: `TEST_VALUES_TYPE`, `VERIFY_STRICTLY_NEWER_THAN_INVALID`,
+  and `VERIFY_EPOCH_NOT_NEWER` (§10, §4.3) are new codes shipped as a patch,
+  because they are new FAILURE MODES from new, additive functionality
+  (`testMany`, `strictlyNewerThan`) — no existing code's meaning changed.
+  Note that widening the `TesseraErrorCode` union is still observable at the
+  TYPE level (see the next point), which is why consumers must not depend on
+  the union being closed.
 - **Consequence for consumers: do NOT write an exhaustive `switch` over
   `TesseraErrorCode` with no `default`, and do NOT write a
   `Record<TesseraErrorCode, ...>` that TypeScript would only accept if every
   current code has an entry.** Either pattern compiles cleanly against
   today's union but breaks (a `switch` silently falls through with no case
-  matched; a `Record` literal fails to type-check) the moment a future MINOR
+  matched; a `Record` literal fails to type-check) the moment a future non-breaking
   release adds one more code — which this contract explicitly allows it to
   do. Write a `switch` with a `default` (or an `if/else if` chain with a
   trailing `else`) that handles "a code I don't specifically recognise" as
@@ -1221,6 +1227,12 @@ bucket (§2.8) — it "leaks by design"; `describeFilter` changes nothing about
 that, it only makes reading it a documented operation instead of a
 `f._memberCountBand` reach-around.
 
+**`describeFilter` fields are unauthenticated unless `f` came from
+`verifyAndParseFilter`.** It reports whatever the header says. On the output
+of a bare `parseFilter(blob)` nothing has been signature-checked, so never
+trust `describeFilter(parseFilter(blob)).epoch` (or any other field) for
+freshness or provenance — verify first (§4.3), then describe.
+
 Throws `TEST_FILTER_TYPE` (§9) if `f` is not a `MembershipFilter`-shaped
 object — the SAME code `testMembership`/`testMany` throw for the same
 reason.
@@ -1239,9 +1251,12 @@ semantics and validation `testMembership(f, v)` applies to a single value:
   no equivalent case to reuse a code from, since it takes one scalar value,
   not a container.
 
-`testMany(f, values)` is equivalent to `values.map(v => testMembership(f,
-v))` for every input, valid or invalid (same results, same thrown code on the
-same first bad element) — it validates `f` once rather than once per element
+For any dense array, `testMany(f, values)` is equivalent to
+`values.map(v => testMembership(f, v))` (same results, same thrown code on the
+same first bad element). It is NOT equivalent for other inputs: a sparse array's
+holes are skipped by `.map` but rejected by `testMany` with `TEST_VALUE_INVALID`,
+and a non-array throws `TEST_VALUES_TYPE` where `.map` would throw a raw
+`TypeError` — it validates `f` once rather than once per element
 and calls the underlying fuse query directly, which is faster than the
 equivalent `.map` loop for a large `valuesHex` but is not a different
 algorithm: each value is still hashed and queried independently (§2.6).

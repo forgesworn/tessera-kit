@@ -334,6 +334,10 @@ export function testMany(f: MembershipFilter, valuesHex: readonly string[]): boo
  * no documented public meaning beyond "opaque construction/query state" and
  * are left out to keep this a stable, minimal contract.
  *
+ * UNAUTHENTICATED unless `f` came from `verifyAndParseFilter`: this reports
+ * whatever the header says. Never trust `describeFilter(parseFilter(blob))
+ * .epoch` (or any field) for freshness or provenance — verify first.
+ *
  * @param f the `MembershipFilter` to describe.
  * @throws `TEST_FILTER_TYPE` if `f` is not a `MembershipFilter`-shaped object
  *         (the SAME code `testMembership`/`testMany` throw for the same

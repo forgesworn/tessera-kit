@@ -107,4 +107,5 @@ deployment being replayed as another's. Full posture in SECURITY.md.
 - [README](https://github.com/forgesworn/tessera-kit/blob/main/README.md): usage guide with examples
 - [PROTOCOL.md](https://github.com/forgesworn/tessera-kit/blob/main/PROTOCOL.md): KFLT byte layout, fuse construction + seed scheme, signing digest, capability bytes, Nostr publication shape, FPR math
 - [SECURITY.md](https://github.com/forgesworn/tessera-kit/blob/main/SECURITY.md): honest privacy posture (keyed = speed-bump; pin-verify mandatory; accumulation budget)
+- [ROADMAP.md](https://github.com/forgesworn/tessera-kit/blob/main/ROADMAP.md): shipped vs open work, what is blocked on what, and how an agent should pick up the next item
 - [kenspeckle](https://github.com/forgesworn/kenspeckle): relationships + discovery primitive that consumes tessera-kit

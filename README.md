@@ -254,6 +254,10 @@ verification words), [`geohash-kit`](https://github.com/forgesworn/geohash-kit)
 (location), [`nsec-tree`](https://github.com/forgesworn/nsec-tree) (hierarchical
 key derivation).
 
+## Roadmap
+
+What has shipped, what is open and what each open item is blocked on: [ROADMAP.md](./ROADMAP.md).
+
 ## Licence
 
 MIT.

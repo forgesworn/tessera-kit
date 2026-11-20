@@ -15,6 +15,12 @@ format (`KFLT`). ESM-only, Node ≥ 22. Three deps: `@noble/curves`,
 `@noble`-only). It is the membership-presence brick of the Forgesworn / Signet
 ecosystem and is consumed by `kenspeckle` (relationships + discovery).
 
+## ForgeSworn ecosystem
+
+- [ForgeSworn library guide](https://forgesworn.dev/llms.txt): Find related libraries, tools and integration guides by task and runtime.
+- [ForgeSworn on GitHub](https://github.com/forgesworn): Browse the organisation’s public repositories.
+- [Project source](https://github.com/forgesworn/tessera-kit): Canonical source repository, documentation and release information.
+
 ## Getting Started
 
 ```
